@@ -111,3 +111,34 @@ export function ramCardTerminal(ui: TerminalUi, r: RamInfo | null, error: string
     </Text>
   )
 }
+
+// The right zone's divider: light/dark colors that stay visible on either band background.
+const ZONE_STYLE =
+  '<style>.pbz-l{stroke:#c8c7c2}@media (prefers-color-scheme: dark){.pbz-l{stroke:#5c5b57}}</style>'
+// Where the card's area starts, right of the divider.
+const ZONE_LEFT = 8
+const ZONE_CARD_MAX = 160
+
+/**
+ * The desktop band's right zone, `width` × `height`: a 1px divider down its
+ * left edge (the whole band tall) and the RAM card, centered in the area right
+ * of the divider and top-aligned with the main bar (RAM_CARD_H tall).
+ */
+export function rightZoneSvg(r: RamInfo | null, error: string | null, width: number, height: number): string {
+  const w = Math.max(ZONE_LEFT + 24, Math.round(width))
+  const h = Math.max(RAM_CARD_H, Math.round(height))
+  const area = w - ZONE_LEFT
+  const cardW = Math.max(24, Math.min(ZONE_CARD_MAX, area - 8))
+  const cardX = ZONE_LEFT + Math.round((area - cardW) / 2)
+  const card = ramCardSvg(r, cardW, RAM_CARD_H, false, error).replace(
+    '<svg xmlns="http://www.w3.org/2000/svg" ',
+    `<svg id="pbz-card" x="${cardX}" y="0" `,
+  )
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">` +
+    ZONE_STYLE +
+    `<line id="pbz-line" class="pbz-l" x1="0.5" y1="2" x2="0.5" y2="${h - 2}" stroke-width="1"/>` +
+    card +
+    '</svg>'
+  )
+}

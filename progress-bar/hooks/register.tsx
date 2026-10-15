@@ -13,7 +13,7 @@ import { STRINGS, fmtTokens, pickLang, type Lang, type TerminalUi } from './shar
 import { MAIN_H, mainRowSvg, mainRowTerminal } from './main-row'
 import { AGENT_ROW_H, agentRowSvg, agentRowTerminal, type Branch } from './agent-rows'
 import { RAM_POLL_MS, fmtRamPair, parseRam, ramProbes, type RamInfo, type RamProbe } from './ram'
-import { ramCardSvg, ramCardTerminal } from './ram-card'
+import { ramCardTerminal, rightZoneSvg } from './ram-card'
 
 // This mod's own values; it tracks everything itself.
 const flow = atom({ plugin: 'progress-bar', key: 'flow' } as const, null as Flow | null)
@@ -147,55 +147,34 @@ async function pollRam($: EngineInterface): Promise<void> {
   }
 }
 
-// The thin vertical line between the left column (main bar, agents control,
-// agent rows) and the RAM card: one Svg, from the band's top down through
-// every agent row, so its x is wherever the left column ends.
-const SEP_W = 1
 // The "+N altri" text line under the agent rows, as tall as a row.
 const MORE_H = 18
 
-function dividerSvg(height: number): string {
-  const h = Math.max(1, Math.round(height))
-  return (
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${SEP_W}" height="${h}" viewBox="0 0 ${SEP_W} ${h}">` +
-    '<style>.pbs-l{fill:#e4e4e1}@media (prefers-color-scheme: dark){.pbs-l{fill:#333331}}</style>' +
-    `<rect class="pbs-l" x="0" y="0" width="${SEP_W}" height="${h}"/>` +
-    '</svg>'
-  )
-}
-
-// The desktop band: [left column: main bar + agents?, agent rows] [divider]
-// [RAM card], the RAM card at a fixed width. The desktop puts ~GAP_PX between siblings.
+// The desktop band: [left column: main bar + agents?, agent rows] [right zone:
+// divider + RAM card], the left column LEFT_SHARE of the row and the right zone
+// the rest. The desktop puts ~GAP_PX between siblings.
 const GAP_PX = 8
 // The row width is estimated from bodyColumns; ROW_SAFETY_PX more is held back
 // so an estimate a little wide never makes the row wrap.
 const ROW_SAFETY_PX = 24
-const RAM_W = 120
-// Under PCT_ONLY_BELOW px of row, the RAM card shrinks to RAM_PCT_W and shows the percent only.
-const PCT_ONLY_BELOW = 500
-const RAM_PCT_W = 72
-const MAIN_MIN = 60
-const RAM_MIN = 40
+const LEFT_SHARE = 0.8
+const MAIN_MIN = 40
 
-type RowGeometry = { rowW: number; leftW: number; mainW: number; ramW: number; agentsPx: number; isRamPctOnly: boolean }
+type RowGeometry = { rowW: number; leftW: number; mainW: number; rightW: number; agentsPx: number }
 
 /**
  * Widths of the desktop band for `cols` body columns and an agents label of
  * `agentsLen` characters (0: none). leftW is the left column (the agent rows'
- * width); the agents estimate only sizes the main bar, never the divider's x.
+ * width), rightW the right zone (divider + RAM card); the agents estimate
+ * only sizes the main bar, never the divider's x.
  */
 function desktopRowGeometry(cols: number, agentsLen: number): RowGeometry {
   const rowW = Math.max(180, Math.min(1600, cols * 8 - 96 - ROW_SAFETY_PX))
   const agentsPx = agentsLen > 0 ? Math.ceil(agentsLen * 7.5) + 24 : 0
-  const isRamPctOnly = rowW < PCT_ONLY_BELOW
-  // Everything but the main bar: agents + gap in the left column, then gap, divider, gap.
-  const fixed = (agentsPx ? agentsPx + GAP_PX : 0) + GAP_PX + SEP_W + GAP_PX
-  let ramW = isRamPctOnly ? RAM_PCT_W : RAM_W
-  // Only on a very narrow row: the RAM card gives way (to RAM_MIN) before the main bar drops under MAIN_MIN.
-  if (rowW - fixed - ramW < MAIN_MIN) ramW = Math.max(RAM_MIN, rowW - fixed - MAIN_MIN)
-  const leftW = rowW - ramW - SEP_W - 2 * GAP_PX
-  const mainW = Math.max(RAM_MIN, leftW - (agentsPx ? agentsPx + GAP_PX : 0))
-  return { rowW, leftW, mainW, ramW, agentsPx, isRamPctOnly }
+  const leftW = Math.round(rowW * LEFT_SHARE)
+  const rightW = rowW - leftW - GAP_PX
+  const mainW = Math.max(MAIN_MIN, leftW - (agentsPx ? agentsPx + GAP_PX : 0))
+  return { rowW, leftW, mainW, rightW, agentsPx }
 }
 
 /** The agents control's label: `▾3 · 45k`, `▴` when open, a `●` first while any runs. */
@@ -658,11 +637,12 @@ export const register: Register = (on, options) => {
       const { Svg } = ui
       const cols = e.props.bodyColumns || 100
       const g = desktopRowGeometry(cols, agentsButton ? agentsLabel.length : 0)
-      // The divider spans the left column exactly: the rows' heights are fixed.
-      const dividerH = MAIN_H + shown.length * AGENT_ROW_H + (moreLine ? MORE_H : 0)
+      // The right zone (and its divider) spans the left column exactly: the rows' heights are fixed.
+      const totalH = MAIN_H + shown.length * AGENT_ROW_H + (moreLine ? MORE_H : 0)
       return (
         <Box flexDirection="row" alignItems="flex-start" justifyContent="flex-start" width="100%" gap={1}>
-          <Box key="left" flexDirection="column" gap={0} flexShrink={0}>
+          {/* A percentage, not g.leftW: a Box's numeric width is not pixels, so 80% of the real row it is. */}
+          <Box key="left" flexDirection="column" gap={0} flexShrink={0} width="80%">
             <Box key="top" flexDirection="row" alignItems="center" gap={1}>
               <Svg
                 key="main"
@@ -682,16 +662,13 @@ export const register: Register = (on, options) => {
               </Box>
             ) : null}
           </Box>
-          <Svg key="sep" source={dividerSvg(dividerH)} alt="" width={SEP_W} height={dividerH} />
-          <Box key="right" flexDirection="column" alignItems="flex-start" flexShrink={0}>
-            <Svg
-              key="ram"
-              source={ramCardSvg(ramInfo, g.ramW, MAIN_H, g.isRamPctOnly, ramErr)}
-              alt={ramAlt}
-              width={g.ramW}
-              height={MAIN_H}
-            />
-          </Box>
+          <Svg
+            key="ram"
+            source={rightZoneSvg(ramInfo, ramErr, g.rightW, totalH)}
+            alt={ramAlt}
+            width={g.rightW}
+            height={totalH}
+          />
         </Box>
       )
     }

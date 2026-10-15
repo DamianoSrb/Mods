@@ -18,9 +18,11 @@ const PROPS = {
 
 // The desktop's row geometry, as register.tsx estimates it.
 const GAP_PX = 8
-const RAM_W = 120
 // 24px of safety under the bodyColumns estimate, so the row never wraps.
 const rowWOf = (cols: number): number => Math.max(180, Math.min(1600, cols * 8 - 96 - 24))
+// The left column takes 80% of the row, the right zone (divider + RAM) the rest less a gap.
+const leftWOf = (cols: number): number => Math.round(rowWOf(cols) * 0.8)
+const rightWOf = (cols: number): number => rowWOf(cols) - leftWOf(cols) - GAP_PX
 const agentsPxOf = (label: string): number => Math.ceil(label.length * 7.5) + 24
 
 // With `isMulti`, each spawn gets its own agent id (one row per agent).
@@ -67,28 +69,48 @@ type Node = {
 const kids = (n: unknown): Node[] => ((n as Node)?.children ?? []).filter((c): c is Node => !!c && typeof c === 'object')
 const firstRow = (tree: unknown): Node[] => kids(kids(tree)[0])
 const keyOf = (k: Node | undefined): string => k?.props?.key ?? k?.type ?? '?'
-// The desktop band: [left column] [divider] [right column].
-const desktopCols = (tree: unknown): { left: Node[]; sep: Node | undefined; right: Node[] } => {
-  const [left, sep, right] = kids(tree)
-  return { left: kids(left), sep, right: kids(right) }
+// The desktop band: [left column] [right zone Svg].
+const desktopCols = (tree: unknown): { left: Node[]; right: Node | undefined } => {
+  const [left, right] = kids(tree)
+  return { left: kids(left), right }
 }
-// The desktop band flattened: the top row (main bar, agents?), the divider, then the RAM column.
+// The desktop band flattened: the top row (main bar, agents?), then the right zone.
 const desktopParts = (tree: unknown): Node[] => {
-  const { left, sep, right } = desktopCols(tree)
-  return [...kids(left[0]), ...(sep ? [sep] : []), ...right]
+  const { left, right } = desktopCols(tree)
+  return [...kids(left[0]), ...(right ? [right] : [])]
 }
 const widthOf = (n: Node | undefined): number => Number(n?.props?.width ?? 0)
 // What a row part is: by key where the drawing keeps one, else by what it draws.
 const roleOf = (n: Node | undefined): string => {
   if (n?.props?.key) return n.props.key
   const src = String(n?.props?.source ?? '')
-  if (n?.type === 'Svg' && src.includes('pbs-l')) return 'sep'
   if (n?.type === 'Svg' && src.includes('pbram-card')) return 'ram'
   if (n?.type === 'Svg' && src.includes('pbm-k')) return 'main'
   const text = JSON.stringify(n ?? {})
   if (text.includes('│')) return 'sep'
   if (text.includes('"RAM')) return 'ram'
   return keyOf(n)
+}
+// The right zone at `cols` body columns and `height`: one Svg, ~20% of the row,
+// a visible divider down its left edge, the RAM card centered right of it.
+function expectZone(n: Node | undefined, cols: number, height: number): void {
+  const w = rightWOf(cols)
+  expect(n?.type).toBe('Svg')
+  expect(Math.abs(widthOf(n) - rowWOf(cols) * 0.2)).toBeLessThanOrEqual(GAP_PX + 1)
+  expect(widthOf(n)).toBe(w)
+  expect(Number(n?.props?.height)).toBe(height)
+  const src = String(n?.props?.source)
+  expect(src).toContain(`width="${w}" height="${height}"`)
+  expect(src).toContain(`<line id="pbz-line" class="pbz-l" x1="0.5" y1="2" x2="0.5" y2="${height - 2}"`)
+  expect(src).toContain('#c8c7c2')
+  expect(src).toContain('#5c5b57')
+  expect(src).toContain('pbram-card')
+  expect(src).toMatch(/RAM|%</)
+  const area = w - 8
+  const cardW = Math.min(160, area - 8)
+  const m = src.match(/<svg id="pbz-card" x="(\d+)" y="0" width="(\d+)" height="30"/)
+  expect(Number(m?.[2])).toBe(cardW)
+  expect(Math.abs(Number(m?.[1]) - ((area - cardW) / 2 + 8))).toBeLessThanOrEqual(1)
 }
 const ramOf = async (ui: Mounted<Surface, 'AbovePrompt'>): Promise<Node | undefined> =>
   desktopParts(await ui.drawn()).find(n => roleOf(n) === 'ram')
@@ -146,48 +168,49 @@ test('terminal row: [main] [agents] │ [RAM], compact agents label', IT, async 
   expect((await ui.find({ key: 'agents' }))?.props.label).toBe('●▾1 · 0')
 })
 
-test('desktop row without agents: [main] [sep] [RAM 120px], main takes the rest', IT, async ($, on) => {
+test('desktop row without agents: [main] [right zone 20%], no 1px divider Svg', IT, async ($, on) => {
   world(on)
   await start($)
   const ui = await mount($, 'desktop')
   const tree = await ui.drawn()
   expect(((tree as Node)?.props as { justifyContent?: string; alignItems?: string })?.justifyContent).toBe('flex-start')
   expect(((tree as Node)?.props as { alignItems?: string })?.alignItems).toBe('flex-start')
+  expect(kids(tree).length).toBe(2)
   const parts = desktopParts(tree)
-  expect(parts.map(roleOf)).toEqual(['main', 'sep', 'ram'])
+  expect(parts.map(roleOf)).toEqual(['main', 'ram'])
+  expect(parts.some(n => widthOf(n) === 1)).toBe(false)
+  expect(JSON.stringify(tree)).not.toContain('pbs-l')
   const rowW = rowWOf(100)
   expect(rowW).toBeGreaterThanOrEqual(500)
-  const [main, sep, ram] = parts
-  expect(widthOf(sep)).toBe(1)
-  expect(Number(sep?.props?.height)).toBe(30)
-  expect(String(sep?.props?.source)).toContain('#e4e4e1')
-  expect(String(sep?.props?.source)).toContain('#333331')
-  expect(widthOf(ram)).toBe(RAM_W)
-  expect(String(ram?.props?.source)).toContain(`width="${RAM_W}" height="30"`)
-  // main + gap + sep + gap + RAM: exactly the (conservative) row.
-  expect(widthOf(main) + GAP_PX + 1 + GAP_PX + RAM_W).toBe(rowW)
+  // The left column is sized as a share of the real row, never as a number (a Box's numbers are not px).
+  expect((kids(tree)[0]?.props as { width?: unknown })?.width).toBe('80%')
+  // No agents: the main bar is the whole left column.
+  expect(widthOf(parts[0])).toBe(leftWOf(100))
+  expectZone(parts[1], 100, 30)
+  // left + gap + right: exactly the (conservative) row.
+  expect(leftWOf(100) + GAP_PX + widthOf(parts[1])).toBe(rowW)
 })
 
 for (const cols of [100, 150, 200]) {
-  test(`desktop row with agents at ${cols} cols: RAM keeps 120px at the far right`, IT, async ($, on) => {
+  test(`desktop row with agents at ${cols} cols: the right zone keeps 20% at the far right`, IT, async ($, on) => {
     world(on)
     await start($)
     const ui = await mount($, 'desktop', { bodyColumns: cols })
     await spawn($)
     await ui.redraw()
     const parts = desktopParts(await ui.drawn())
-    expect(parts.map(roleOf)).toEqual(['main', 'agents', 'sep', 'ram'])
+    expect(parts.map(roleOf)).toEqual(['main', 'agents', 'ram'])
     expect(parts[1]?.props?.label).toBe('●▾1 · 0')
     const rowW = rowWOf(cols)
     expect(rowW).toBeGreaterThanOrEqual(500)
-    expect(widthOf(parts[3])).toBe(RAM_W)
-    expect(String(parts[3]?.props?.source)).toContain('pbram-card')
-    // main + gap + agents + gap + sep + gap + RAM = row.
-    expect(widthOf(parts[0]) + GAP_PX + agentsPxOf('●▾1 · 0') + GAP_PX + 1 + GAP_PX + RAM_W).toBe(rowW)
+    expectZone(parts[2], cols, 30)
+    // main + gap + agents = left column; + gap + right zone = row.
+    expect(widthOf(parts[0]) + GAP_PX + agentsPxOf('●▾1 · 0')).toBe(leftWOf(cols))
+    expect(leftWOf(cols) + GAP_PX + widthOf(parts[2])).toBe(rowW)
   })
 }
 
-test('desktop row under 500px: a 72px percent-only RAM card, still present', IT, async ($, on) => {
+test('desktop row under 500px: the narrow card shows the percent only, still present', IT, async ($, on) => {
   const c = world(on)
   winRam(on, () => 8 * 1024 * 1024)
   await start($)
@@ -197,14 +220,14 @@ test('desktop row under 500px: a 72px percent-only RAM card, still present', IT,
   await spawn($)
   await ui.redraw()
   const parts = desktopParts(await ui.drawn())
-  expect(parts.map(roleOf)).toEqual(['main', 'agents', 'sep', 'ram'])
+  expect(parts.map(roleOf)).toEqual(['main', 'agents', 'ram'])
   const rowW = rowWOf(cols)
   expect(rowW).toBeLessThan(500)
-  expect(widthOf(parts[3])).toBe(72)
-  const src = String(parts[3]?.props?.source)
+  expectZone(parts[2], cols, 30)
+  const src = String(parts[2]?.props?.source)
   expect(src).toContain('>50%</text>')
   expect(src).not.toContain('pbram-track')
-  expect(widthOf(parts[0]) + GAP_PX + agentsPxOf('●▾1 · 0') + GAP_PX + 1 + GAP_PX + 72).toBe(rowW)
+  expect(widthOf(parts[0]) + GAP_PX + agentsPxOf('●▾1 · 0')).toBe(leftWOf(cols))
 })
 
 test('the RAM poll writes the ram atom (Windows probe mocked)', IT, async ($, on) => {
@@ -270,7 +293,7 @@ test('every probe failing: RAM ? with the reason in alt, logged once', IT, async
   await c.settle()
   const ui = await mount($, 'desktop')
   const ram = await ramOf(ui)
-  expect(widthOf(ram)).toBe(RAM_W)
+  expectZone(ram, 100, 30)
   expect(String(ram?.props?.source)).toContain('>RAM ?</text>')
   const alt = String(ram?.props?.alt)
   expect(alt).toContain('RAM ?')
@@ -301,7 +324,7 @@ test('linux: /proc/meminfo through fs.read; a later parse failure keeps the valu
 })
 
 for (const count of [1, 3]) {
-  test(`desktop band with ${count} agent row(s): [left column] [divider 1×(30+18n)] [RAM 120px]`, IT, async ($, on) => {
+  test(`desktop band with ${count} agent row(s): [left column 80%] [right zone 20% × (30+18n)]`, IT, async ($, on) => {
     world(on, true)
     await start($)
     const ui = await mount($, 'desktop', { bodyColumns: 150 })
@@ -319,26 +342,17 @@ for (const count of [1, 3]) {
     await ui.redraw()
     await ui.press({ key: 'agents' })
     const tree = await ui.drawn()
-    const { left, sep, right } = desktopCols(tree)
-    expect(kids(tree).length).toBe(3)
+    const { left, right } = desktopCols(tree)
+    expect(kids(tree).length).toBe(2)
     // Left column: the top row [main, agents], then the agent rows.
     expect(kids(left[0]).map(roleOf)).toEqual(['main', 'agents'])
     const rows = left.slice(1)
     expect(rows.length).toBe(count)
-    // The divider: one 1px Svg spanning the main bar and every agent row.
-    expect(sep?.type).toBe('Svg')
-    expect(widthOf(sep)).toBe(1)
-    expect(Number(sep?.props?.height)).toBe(30 + 18 * count)
-    const sepSrc = String(sep?.props?.source)
-    expect(sepSrc).toContain(`height="${30 + 18 * count}"`)
-    expect(sepSrc).toContain('#e4e4e1')
-    expect(sepSrc).toContain('#333331')
-    // The RAM column: the 120px card alone, last.
-    expect(right.map(roleOf)).toEqual(['ram'])
-    expect(widthOf(right[0])).toBe(RAM_W)
-    expect(Number(right[0]?.props?.height)).toBe(30)
+    // The right zone: one Svg spanning the main bar and every agent row, divider + RAM inside.
+    expect(roleOf(right)).toBe('ram')
+    expectZone(right, 150, 30 + 18 * count)
     // Agent rows at the left column's width; no divider of their own; right text ends 4px short.
-    const leftW = rowWOf(150) - RAM_W - 1 - 2 * GAP_PX
+    const leftW = leftWOf(150)
     for (const n of rows) {
       expect(widthOf(n)).toBe(leftW)
       const r = String(n.props?.source)
@@ -354,18 +368,18 @@ for (const count of [1, 3]) {
   })
 }
 
-test('desktop band, agents closed: the divider is the main bar tall', IT, async ($, on) => {
+test('desktop band, agents closed: the right zone is the main bar tall', IT, async ($, on) => {
   world(on)
   await start($)
   const ui = await mount($, 'desktop', { bodyColumns: 150 })
   await spawn($)
   await ui.redraw()
-  const { left, sep } = desktopCols(await ui.drawn())
+  const { left, right } = desktopCols(await ui.drawn())
   expect(left.length).toBe(1)
-  expect(Number(sep?.props?.height)).toBe(30)
+  expectZone(right, 150, 30)
 })
 
-test('desktop band cut by maxRows: the divider includes the +N line', IT, async ($, on) => {
+test('desktop band cut by maxRows: the right zone includes the +N line', IT, async ($, on) => {
   world(on, true)
   await start($)
   const ui = await mount($, 'desktop', { bodyColumns: 150, maxRows: 3 })
@@ -383,10 +397,10 @@ test('desktop band cut by maxRows: the divider includes the +N line', IT, async 
   await ui.redraw()
   await ui.press({ key: 'agents' })
   const tree = await ui.drawn()
-  const { left, sep } = desktopCols(tree)
+  const { left, right } = desktopCols(tree)
   // maxRows 3: main + 1 row + the "+N" line.
   const svgRows = left.slice(1).filter(n => n.type === 'Svg')
   expect(svgRows.length).toBe(1)
   expect(JSON.stringify(left)).toContain('+3')
-  expect(Number(sep?.props?.height)).toBe(30 + 18 + 18)
+  expectZone(right, 150, 30 + 18 + 18)
 })
