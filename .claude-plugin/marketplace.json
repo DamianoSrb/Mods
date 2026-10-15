@@ -1,0 +1,12 @@
+{
+  "name": "damiano-mods",
+  "owner": { "name": "Damiano Sommavilla" },
+  "description": "Mod di Claude Code di Damiano Sommavilla.",
+  "plugins": [
+    {
+      "name": "progress-bar",
+      "source": "./progress-bar",
+      "description": "Banda animata sopra il prompt: avanzamento del flow, attività del turno, RAM e subagenti con i token."
+    }
+  ]
+}

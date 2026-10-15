@@ -1,0 +1,16 @@
+{
+  "name": "progress-bar",
+  "version": "0.1.0",
+  "description": "Always-visible animated progress band above the prompt: flow progress, turn activity, RAM in use and per-agent progress with tokens.",
+  "author": { "name": "Damiano Sommavilla" },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "language": {
+      "type": "string",
+      "title": "Band language",
+      "description": "auto follows Claude Code's language setting, then the system locale",
+      "default": "auto",
+      "options": ["auto", "it", "en"]
+    }
+  }
+}
