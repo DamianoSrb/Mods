@@ -111,3 +111,11 @@ test('mainRowSvg draws the trunk only with hasBranch', () => {
   expect(mainRowSvg(m, 600)).not.toContain('pbm-br')
   expect(mainRowSvg(m, 600, 0, true)).toMatch(TRUNK)
 })
+
+test('agentRowSvg without sepX draws no divider; with sepX it ends content before it', () => {
+  expect(agentRowSvg(row('running'), 600, 'mid')).not.toContain('pba-sep')
+  const s = agentRowSvg(row('running'), 600, 'mid', 450)
+  expect(s).toContain('width="600" height="18"')
+  expect(s).toContain('<rect class="pba-sep" x="450" y="0" width="1" height="18"/>')
+  expect(s).toMatch(/class="pba-s" x="440"/)
+})

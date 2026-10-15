@@ -147,9 +147,10 @@ async function pollRam($: EngineInterface): Promise<void> {
   }
 }
 
-// The thin vertical line between the agents control and the RAM card.
+// The thin vertical line between the agents control and the RAM card, the
+// row's full height; the agent rows below carry it on at the same x.
 const SEP_W = 1
-const SEP_H = 18
+const SEP_H = MAIN_H
 
 function separatorSvg(): string {
   return (
@@ -173,7 +174,7 @@ const RAM_PCT_W = 72
 const MAIN_MIN = 60
 const RAM_MIN = 40
 
-type RowGeometry = { rowW: number; mainW: number; ramW: number; agentsPx: number; isRamPctOnly: boolean }
+type RowGeometry = { rowW: number; mainW: number; ramW: number; agentsPx: number; isRamPctOnly: boolean; sepX: number }
 
 /** Widths of the desktop row for `cols` body columns and an agents label of `agentsLen` characters (0: none). */
 function desktopRowGeometry(cols: number, agentsLen: number): RowGeometry {
@@ -186,7 +187,9 @@ function desktopRowGeometry(cols: number, agentsLen: number): RowGeometry {
   // Only on a very narrow row: the RAM card gives way (to RAM_MIN) before the main bar drops under MAIN_MIN.
   if (rowW - fixed - ramW < MAIN_MIN) ramW = Math.max(RAM_MIN, rowW - fixed - MAIN_MIN)
   const mainW = Math.max(RAM_MIN, rowW - fixed - ramW)
-  return { rowW, mainW, ramW, agentsPx, isRamPctOnly }
+  // The separator's x in the row: main, gap, then agents + gap.
+  const sepX = mainW + GAP_PX + (agentsPx ? agentsPx + GAP_PX : 0)
+  return { rowW, mainW, ramW, agentsPx, isRamPctOnly, sepX }
 }
 
 /** The agents control's label: `▾3 · 45k`, `▴` when open, a `●` first while any runs. */
@@ -651,7 +654,8 @@ export const register: Register = (on, options) => {
       const g = desktopRowGeometry(cols, agentsButton ? agentsLabel.length : 0)
       return (
         <Box flexDirection="column" gap={0}>
-          <Box flexDirection="row" alignItems="center" justifyContent="space-between" width="100%" gap={1}>
+          {/* Packed from the left, never spread: the divider's x must match the sepX the agent rows draw at. */}
+          <Box flexDirection="row" alignItems="center" justifyContent="flex-start" width="100%" gap={1}>
             <Svg
               key="main"
               source={mainRowSvg(m, g.mainW, Math.floor(at / 1000), hasBranch)}
@@ -674,7 +678,7 @@ export const register: Register = (on, options) => {
           {shown.length > 0 || moreLine ? (
             <Box flexDirection="column" gap={0}>
               {shown.map((r, i) => (
-                <Svg key={r.id} source={agentRowSvg(r, g.rowW, branchOf(i))} alt={rowAlt(r)} width={g.rowW} height={AGENT_ROW_H} />
+                <Svg key={r.id} source={agentRowSvg(r, g.rowW, branchOf(i), g.sepX)} alt={rowAlt(r)} width={g.rowW} height={AGENT_ROW_H} />
               ))}
               {moreLine ? (
                 <Box paddingLeft={2}>

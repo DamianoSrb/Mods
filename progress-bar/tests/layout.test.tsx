@@ -145,14 +145,14 @@ test('desktop row without agents: [main] [sep] [RAM 120px], main takes the rest'
   const ui = await mount($, 'desktop')
   const tree = await ui.drawn()
   const outer = kids(tree)[0]
-  expect((outer?.props as { justifyContent?: string })?.justifyContent).toBe('space-between')
+  expect((outer?.props as { justifyContent?: string })?.justifyContent).toBe('flex-start')
   const parts = desktopParts(tree)
   expect(parts.map(roleOf)).toEqual(['main', 'sep', 'ram'])
   const rowW = rowWOf(100)
   expect(rowW).toBeGreaterThanOrEqual(500)
   const [main, sep, ram] = parts
   expect(widthOf(sep)).toBe(1)
-  expect(Number(sep?.props?.height)).toBe(18)
+  expect(Number(sep?.props?.height)).toBe(30)
   expect(String(sep?.props?.source)).toContain('#e4e4e1')
   expect(String(sep?.props?.source)).toContain('#333331')
   expect(widthOf(ram)).toBe(RAM_W)
@@ -291,4 +291,38 @@ test('linux: /proc/meminfo through fs.read; a later parse failure keeps the valu
   const ram = await ramOf(ui)
   expect(String(ram?.props?.source)).toContain('8/16 GB')
   expect(String(ram?.props?.alt)).toContain('parse failed (linux)')
+})
+
+test('desktop divider: the top-row separator x carries on down through the agent rows', IT, async ($, on) => {
+  world(on)
+  await start($)
+  const ui = await mount($, 'desktop', { bodyColumns: 150 })
+  await spawn($)
+  await ui.redraw()
+  await ui.press({ key: 'agents' })
+  const tree = await ui.drawn()
+  const parts = desktopParts(tree)
+  expect(parts.map(roleOf)).toEqual(['main', 'agents', 'sep', 'ram'])
+  const sep = parts[2]
+  expect(Number(sep?.props?.height)).toBe(30)
+  expect(String(sep?.props?.source)).toContain('height="30"')
+  // The separator's x: main + gap + agents + gap (the RAM card follows after sep + gap).
+  const label = String(parts[1]?.props?.label)
+  const sepX = widthOf(parts[0]) + GAP_PX + agentsPxOf(label) + GAP_PX
+  expect(sepX + 1 + GAP_PX + RAM_W).toBe(rowWOf(150))
+  const rows = (JSON.stringify(tree).match(/"source":"<svg.*?<\/svg>/g) ?? [])
+    .map(s => s.replace(/\\"/g, '"'))
+    .filter(s => s.includes('pba-'))
+  expect(rows.length).toBe(1)
+  for (const r of rows) {
+    expect(r).toContain(`width="${rowWOf(150)}" height="18"`)
+    expect(r).toContain(`<rect class="pba-sep" x="${sepX}" y="0" width="1" height="18"/>`)
+    expect(r).toContain('#e4e4e1')
+    expect(r).toContain('#333331')
+    // The right text (anchored at its end) and the bar end before the divider.
+    const m = r.match(/class="pba-s" x="(\d+(?:\.\d+)?)"[^>]*text-anchor="end"/)
+    expect(Number(m?.[1])).toBe(sepX - 10)
+    for (const b of r.matchAll(/class="pba-k" x="(\d+(?:\.\d+)?)" y="[^"]*" width="(\d+(?:\.\d+)?)"/g))
+      expect(Number(b[1]) + Number(b[2])).toBeLessThan(sepX - 10)
+  }
 })

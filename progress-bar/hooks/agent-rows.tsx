@@ -66,15 +66,25 @@ const branchSvg = (branch: Branch, status: AgentRowModel['status']): string => {
   )
 }
 
-export function agentRowSvg(r: AgentRowModel, width: number, branch: Branch = 'last'): string {
+// The vertical divider (savvy's line color) that runs down from the top row's
+// separator, between the task bar and the RAM card.
+const SEP_CSS = '<style>.pba-sep{fill:#e4e4e1}@media (prefers-color-scheme: dark){.pba-sep{fill:#333331}}</style>'
+
+/**
+ * One agent row, `width` × AGENT_ROW_H. With `sepX`, the divider is drawn at
+ * x = sepX over the full row height (so rows join) and the content ends at
+ * sepX − GAP; the part right of the divider stays empty, under the RAM card.
+ */
+export function agentRowSvg(r: AgentRowModel, width: number, branch: Branch = 'last', sepX?: number): string {
   const W = Math.max(INDENT + 40, Math.round(width))
+  const sx = sepX !== undefined && Number.isFinite(sepX) && sepX > 0 && sepX < W ? Math.round(sepX) : undefined
   const color = colorOf(r.tier)
   const right = rightText(r)
   const rightW = Math.ceil(Math.max(RIGHT_MIN, textWidth(right, 11)))
-  const rightX = W - 2
-  // Title slot: ~35% of the row, shrunk when the bar would fall under its minimum.
+  const rightX = sx !== undefined ? sx - GAP : W - 2
+  // Title slot: ~35% of the content, shrunk when the bar would fall under its minimum.
   const room = rightX - rightW - GAP - TITLE_X - GAP
-  const titleSlot = Math.max(0, Math.min(Math.round(W * 0.35), room - BAR_MIN))
+  const titleSlot = Math.max(0, Math.min(Math.round((rightX + 2) * 0.35), room - BAR_MIN))
   const barX = TITLE_X + titleSlot + GAP
   const barW = Math.max(0, rightX - rightW - GAP - barX)
   const fillW = Math.round(barW * clamp01(r.progress))
@@ -83,7 +93,9 @@ export function agentRowSvg(r: AgentRowModel, width: number, branch: Branch = 'l
   // Without reported steps the bar falls back to the context, drawn grey.
   const fillPaint = r.isContext ? 'class="pba-m"' : `fill="${color}"`
   const fill = fillW > 0 ? `<rect ${fillPaint} x="${barX}" y="${barY}" width="${fillW}" height="${BAR_H}" rx="2"/>` : ''
+  const sep = sx !== undefined ? `<rect class="pba-sep" x="${sx}" y="0" width="1" height="${AGENT_ROW_H}"/>` : ''
   const body =
+    sep +
     branchSvg(branch, r.status) +
     statusMark(r.status, color) +
     (title
@@ -91,7 +103,7 @@ export function agentRowSvg(r: AgentRowModel, width: number, branch: Branch = 'l
       : '') +
     (barW > 0 ? `<rect class="pba-k" x="${barX}" y="${barY}" width="${barW}" height="${BAR_H}" rx="2"/>${fill}` : '') +
     `<text class="pba-s" x="${rightX}" y="${TEXT_Y}" text-anchor="end" font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums" style="font-variant-numeric:tabular-nums">${xml(right)}</text>`
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${AGENT_ROW_H}" viewBox="0 0 ${W} ${AGENT_ROW_H}">${ROW_CSS}${body}</svg>`
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${AGENT_ROW_H}" viewBox="0 0 ${W} ${AGENT_ROW_H}">${ROW_CSS}${sx !== undefined ? SEP_CSS : ''}${body}</svg>`
 }
 
 const GLYPH: Record<AgentRowModel['status'], string> = { running: '●', done: '✓', failed: '✗' }
