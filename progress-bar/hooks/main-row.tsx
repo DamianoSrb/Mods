@@ -12,6 +12,13 @@ import type { MainModel } from './model'
 import { ACCENT, DONE, FONT, IDLE, fitText, mulberry32, noise, savvyClasses, strHash, textWidth, xml, type TerminalUi } from './shared'
 
 export const MAIN_H = 30
+/** The main dot's center x: the agent rows' tree trunk runs down from it. */
+export const DOT_X = 5
+const DOT_R = 3
+/** Tree connectors: the accent at 0.55, 1.5px, round caps. */
+export const BRANCH_COLOR = ACCENT
+export const BRANCH_OPACITY = 0.55
+export const BRANCH_W = 1.5
 
 const BAR_H = 22
 const BAR_R = BAR_H / 2
@@ -164,9 +171,10 @@ export const mainRowGeometry = (width: number): { W: number; titleSlot: number; 
 }
 
 /**
- * The row's SVG, `width` × MAIN_H.
+ * The row's SVG, `width` × MAIN_H. With `hasBranch` (agent rows shown below)
+ * a trunk runs from just below the dot down to the row's bottom edge.
  */
-export function mainRowSvg(m: MainModel, width: number, seed = 0): string {
+export function mainRowSvg(m: MainModel, width: number, seed = 0, hasBranch = false): string {
   const { W, titleSlot, barX: BAR_X, barW: BAR_W } = mainRowGeometry(width)
   const H = MAIN_H
   const y0 = (H - BAR_H) / 2
@@ -305,7 +313,8 @@ export function mainRowSvg(m: MainModel, width: number, seed = 0): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
 <style>${savvyClasses('pbm')}${css}${REDUCED}</style>
 <defs><clipPath id="pbm-clip"><rect x="0" y="0" width="${BAR_W}" height="${BAR_H}" rx="${BAR_R}"/></clipPath>${defs}</defs>
-<circle cx="5" cy="${H / 2}" r="3" fill="${dotColor(m)}"/>
+<circle cx="${DOT_X}" cy="${H / 2}" r="${DOT_R}" fill="${dotColor(m)}"/>
+${hasBranch ? `<path class="pbm-br" d="M${DOT_X} ${H / 2 + DOT_R + 2}V${H}" fill="none" stroke="${BRANCH_COLOR}" stroke-opacity="${BRANCH_OPACITY}" stroke-width="${BRANCH_W}" stroke-linecap="round"/>` : ''}
 <text class="pbm-t" x="${TITLE_X}" y="${textY}" font-family="${FONT}" font-size="${TITLE_SIZE}" font-weight="600">${xml(title)}</text>
 <g transform="translate(${BAR_X},${y0})">
 <rect class="pbm-k" width="${BAR_W}" height="${BAR_H}" rx="${BAR_R}"/>

@@ -2,7 +2,11 @@
 // savvy-progress's agents-pane colors: the tier colors the running dot and the
 // bar, a green check / red cross marks the end, the context fallback is grey.
 import type { AgentRowModel } from './model'
+import { BRANCH_COLOR, BRANCH_OPACITY, BRANCH_W, DOT_X } from './main-row'
 import { FONT, colorOf, fitText, savvyClasses, textWidth, xml, type TerminalUi } from './shared'
+
+/** Where a row hangs on the tree: 'mid' (├─, the trunk goes on) or 'last' (└─). */
+export type Branch = 'mid' | 'last'
 
 export const AGENT_ROW_H = 18
 
@@ -14,10 +18,13 @@ const ROW_CSS =
 const OK = '#3B9C5F'
 const KO = '#D0453F'
 
-// Geometry of a row, left to right.
+// Geometry of a row, left to right: the trunk under the main dot, the elbow
+// out to ELBOW_X, then the status mark, title, bar and right text.
 const INDENT = 16
-const MARK_X = 21
-const TITLE_X = 30
+const ELBOW_X = 16
+const CORNER_R = 4
+const MARK_X = 22
+const TITLE_X = 31
 const GAP = 10
 const BAR_MIN = 60
 const BAR_H = 4
@@ -40,7 +47,26 @@ const clamp01 = (n: number): number => (Number.isFinite(n) ? Math.max(0, Math.mi
 
 const rightText = (r: AgentRowModel): string => `${r.stat} · ${r.tokens} tok · ${r.time}`
 
-export function agentRowSvg(r: AgentRowModel, width: number): string {
+const ELBOW_COLOR: Record<AgentRowModel['status'], string> = { running: BRANCH_COLOR, done: '#5fbf8f', failed: KO }
+
+/**
+ * The tree connector: the trunk (accent) at the main dot's x, spanning the
+ * full row for 'mid' so consecutive rows join, down to the corner for 'last';
+ * the elbow out to ELBOW_X in the status color.
+ */
+const branchSvg = (branch: Branch, status: AgentRowModel['status']): string => {
+  const line = (d: string, color: string): string =>
+    `<path class="pba-br" d="${d}" fill="none" stroke="${color}" stroke-opacity="${BRANCH_OPACITY}" stroke-width="${BRANCH_W}" stroke-linecap="round" stroke-linejoin="round"/>`
+  const elbow = ELBOW_COLOR[status]
+  if (branch === 'mid') return line(`M${DOT_X} 0V${AGENT_ROW_H}`, BRANCH_COLOR) + line(`M${DOT_X} ${MID_Y}H${ELBOW_X}`, elbow)
+  const cy = MID_Y - CORNER_R
+  return (
+    line(`M${DOT_X} 0V${cy}`, BRANCH_COLOR) +
+    line(`M${DOT_X} ${cy}Q${DOT_X} ${MID_Y} ${DOT_X + CORNER_R} ${MID_Y}H${ELBOW_X}`, elbow)
+  )
+}
+
+export function agentRowSvg(r: AgentRowModel, width: number, branch: Branch = 'last'): string {
   const W = Math.max(INDENT + 40, Math.round(width))
   const color = colorOf(r.tier)
   const right = rightText(r)
@@ -58,6 +84,7 @@ export function agentRowSvg(r: AgentRowModel, width: number): string {
   const fillPaint = r.isContext ? 'class="pba-m"' : `fill="${color}"`
   const fill = fillW > 0 ? `<rect ${fillPaint} x="${barX}" y="${barY}" width="${fillW}" height="${BAR_H}" rx="2"/>` : ''
   const body =
+    branchSvg(branch, r.status) +
     statusMark(r.status, color) +
     (title
       ? `<text class="pba-t" x="${TITLE_X}" y="${TEXT_Y}" font-family="${FONT}" font-size="12">${xml(title)}</text>`
@@ -75,7 +102,7 @@ const cut = (s: string, max: number): string => {
   return chars.slice(0, Math.max(0, max - 1)).join('') + '…'
 }
 
-export function agentRowTerminal(ui: TerminalUi, r: AgentRowModel, cols: number): JSX.Element {
+export function agentRowTerminal(ui: TerminalUi, r: AgentRowModel, cols: number, branch: Branch = 'last'): JSX.Element {
   const { Text } = ui
   const color = colorOf(r.tier)
   const glyphColor = r.status === 'failed' ? 'red' : r.status === 'done' ? 'green' : color
@@ -88,7 +115,7 @@ export function agentRowTerminal(ui: TerminalUi, r: AgentRowModel, cols: number)
   const bar = '█'.repeat(filled) + '░'.repeat(Math.max(0, barW - filled))
   return (
     <Text wrap="truncate-end">
-      {'  '}
+      <Text dimColor>{branch === 'mid' ? '├─ ' : '└─ '}</Text>
       <Text color={glyphColor}>{GLYPH[r.status]}</Text> {title}{' '}
       {r.isContext ? <Text dimColor>{bar}</Text> : <Text color={color}>{bar}</Text>} <Text dimColor>{right}</Text>
     </Text>

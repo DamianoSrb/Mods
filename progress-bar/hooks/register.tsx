@@ -11,7 +11,7 @@ import {
 } from './model'
 import { STRINGS, fmtTokens, pickLang, type Lang, type TerminalUi } from './shared'
 import { MAIN_H, mainRowSvg, mainRowTerminal } from './main-row'
-import { AGENT_ROW_H, agentRowSvg, agentRowTerminal } from './agent-rows'
+import { AGENT_ROW_H, agentRowSvg, agentRowTerminal, type Branch } from './agent-rows'
 import { RAM_POLL_MS, fmtRamPair, parseRam, ramProbes, type RamInfo, type RamProbe } from './ram'
 import { ramCardSvg, ramCardTerminal } from './ram-card'
 
@@ -633,6 +633,9 @@ export const register: Register = (on, options) => {
     const isCut = rows.length > avail
     const shown = isCut ? rows.slice(0, Math.max(0, avail - 1)) : rows
     const moreLine = isCut && avail >= 1 ? `+${rows.length - shown.length} ${s.more}` : ''
+    // Tree: each shown row is a middle branch (├─) but the last (└─), unless the "+N" line follows it.
+    const branchOf = (i: number): Branch => (i < shown.length - 1 || moreLine ? 'mid' : 'last')
+    const hasBranch = shown.length > 0
 
     const rowAlt = (r: AgentRowModel): string => `${r.title}: ${r.status}, ${r.stat}, ${r.tokens} ${s.tok}, ${r.time}`
     const ramAlt = ramInfo
@@ -647,11 +650,11 @@ export const register: Register = (on, options) => {
       const cols = e.props.bodyColumns || 100
       const g = desktopRowGeometry(cols, agentsButton ? agentsLabel.length : 0)
       return (
-        <Box flexDirection="column">
+        <Box flexDirection="column" gap={0}>
           <Box flexDirection="row" alignItems="center" justifyContent="space-between" width="100%" gap={1}>
             <Svg
               key="main"
-              source={mainRowSvg(m, g.mainW, Math.floor(at / 1000))}
+              source={mainRowSvg(m, g.mainW, Math.floor(at / 1000), hasBranch)}
               alt={alt}
               width={g.mainW}
               height={MAIN_H}
@@ -669,11 +672,15 @@ export const register: Register = (on, options) => {
             </Box>
           </Box>
           {shown.length > 0 || moreLine ? (
-            <Box flexDirection="column">
-              {shown.map(r => (
-                <Svg key={r.id} source={agentRowSvg(r, g.rowW)} alt={rowAlt(r)} width={g.rowW} height={AGENT_ROW_H} />
+            <Box flexDirection="column" gap={0}>
+              {shown.map((r, i) => (
+                <Svg key={r.id} source={agentRowSvg(r, g.rowW, branchOf(i))} alt={rowAlt(r)} width={g.rowW} height={AGENT_ROW_H} />
               ))}
-              {moreLine ? <Text dimColor>{moreLine}</Text> : null}
+              {moreLine ? (
+                <Box paddingLeft={2}>
+                  <Text dimColor>{moreLine}</Text>
+                </Box>
+              ) : null}
             </Box>
           ) : null}
         </Box>
@@ -699,10 +706,10 @@ export const register: Register = (on, options) => {
           </Text>
           {ramCardTerminal(tui, ramInfo, ramErr)}
         </Box>
-        {shown.map(r => (
-          <Box key={r.id}>{agentRowTerminal(tui, r, cols)}</Box>
+        {shown.map((r, i) => (
+          <Box key={r.id}>{agentRowTerminal(tui, r, cols, branchOf(i))}</Box>
         ))}
-        {moreLine ? <Text dimColor>{moreLine}</Text> : null}
+        {moreLine ? <Text dimColor>{`└─ ${moreLine}`}</Text> : null}
       </Box>
     )
   })
