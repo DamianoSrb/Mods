@@ -8,9 +8,8 @@ Una banda sempre visibile sopra il prompt di Claude Code che mostra a che punto 
   - **flow**: un'attività pianificata in più passi. Titolo, barra a sfumatura viola → blu → verde acqua con una tacca per attività, fase (`Piano`, `Design`, `Attività 2/5`, `Revisione`) e percentuale.
   - **In lavoro**: un turno del modello è in corso. Barra animata viola → rosa → ambra, tempo trascorso e numero di tool chiamati.
   - **Pronto**: nessun turno in corso. Durata e tool dell'ultimo turno e, se c'era, il flow appena chiuso (`✓ <titolo>`).
-- **Pulsante di riduzione** a sinistra (`‹`): riduce la banda a un quadrato cliccabile con l'anello di avanzamento e la percentuale al centro; un clic sul quadrato la riapre. Nel terminale il quadrato è un pulsante con il simbolo dell'anello (per esempio `◑ 50%`). La scelta resta tra una sessione e l'altra.
-- **Scheda RAM**: memoria usata e totale (`8/16 GB`), aggiornata ogni 5 secondi, su Windows, macOS e Linux.
-- **Vista agenti**: quando partono dei subagenti compare il pulsante agenti con i token totali (`▾ 2 agenti · 45k tok · 1 attivo`). Premendolo si apre una riga per agente con avanzamento, token usati e tempo (`3/5 · 12k tok · 1:20`); premendolo di nuovo si chiude.
+- **Scheda RAM**, sempre visibile all'estremità destra della riga (larga 120 px; sotto i 500 px di riga solo la percentuale): memoria usata e totale (`8/16 GB`), letta subito all'avvio e poi ogni 5 secondi. Su Windows prova PowerShell (`Get-CimInstance`), poi `wmic`; su Linux legge `/proc/meminfo`; su macOS `sysctl` e `vm_stat`. Se nessuna lettura riesce la scheda mostra `RAM ?`, il motivo è nel testo alternativo della scheda e compare una volta nella trascrizione (`progress-bar: RAM unavailable: …`).
+- **Vista agenti**: quando partono dei subagenti compare, tra la barra e la scheda RAM, il pulsante agenti compatto (`●▾3 · 45k`: `●` se qualcuno lavora, numero di agenti e token totali). Premendolo si apre una riga per agente con avanzamento, token usati e tempo (`3/5 · 12k tok · 1:20`); premendolo di nuovo si chiude.
 
 ## Tool per il modello
 

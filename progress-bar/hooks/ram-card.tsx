@@ -40,9 +40,16 @@ const glyph = (cy: number): string => {
  * The desktop card, `width` × `height` (RAM_CARD_W × RAM_CARD_H by default):
  * chip icon, a load bar taking the free space, `9.8/16 GB`. Under ~110px it
  * drops the icon, under ~80px (or with `isPercentOnly`) it shows only the
- * percent; "RAM –" with no reading.
+ * percent; "RAM –" with no reading yet, "RAM ?" when `error` says why none
+ * could be taken (the reason goes in its aria-label).
  */
-export function ramCardSvg(r: RamInfo | null, width = RAM_CARD_W, height = RAM_CARD_H, isPercentOnly = false): string {
+export function ramCardSvg(
+  r: RamInfo | null,
+  width = RAM_CARD_W,
+  height = RAM_CARD_H,
+  isPercentOnly = false,
+  error: string | null = null,
+): string {
   const w = Math.max(24, Math.round(width))
   const h = Math.max(14, Math.round(height))
   const cy = h / 2
@@ -52,11 +59,12 @@ export function ramCardSvg(r: RamInfo | null, width = RAM_CARD_W, height = RAM_C
   const textR = w - PAD
   const head =
     `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" ` +
-    `viewBox="0 0 ${w} ${h}" role="img" aria-label="${xml(r ? `RAM ${fmtRamPair(r)}` : 'RAM')}">` +
+    `viewBox="0 0 ${w} ${h}" role="img" aria-label="${xml(r ? `RAM ${fmtRamPair(r)}` : error ? `RAM ? (${error})` : 'RAM')}">` +
     STYLE +
     `<rect id="pbram-card" class="k" x="0" y="0" width="${w}" height="${h}" rx="6"/>` +
     (hasIcon ? glyph(cy) : '')
-  if (!r) return `${head}<text id="pbram-label" class="s" x="${barX}" y="${baseline}">RAM –</text></svg>`
+  if (!r)
+    return `${head}<text id="pbram-label" class="s" x="${barX}" y="${baseline}">${error ? 'RAM ?' : 'RAM –'}</text></svg>`
 
   const ratio = ramRatio(r)
   if (w < PAIR_MIN_W || isPercentOnly) {
@@ -86,10 +94,10 @@ export function ramCardSvg(r: RamInfo | null, width = RAM_CARD_W, height = RAM_C
 
 const TERM_BAR = 5
 
-/** The terminal line: `RAM ▕███░░▏ 9.8/16 GB`, the bar colored by load. */
-export function ramCardTerminal(ui: TerminalUi, r: RamInfo | null): JSX.Element {
+/** The terminal line: `RAM ▕███░░▏ 9.8/16 GB`, the bar colored by load; `RAM ?` after a failed probe, `RAM –` before any. */
+export function ramCardTerminal(ui: TerminalUi, r: RamInfo | null, error: string | null = null): JSX.Element {
   const { Text } = ui
-  if (!r) return <Text dimColor>RAM –</Text>
+  if (!r) return <Text dimColor>{error ? 'RAM ?' : 'RAM –'}</Text>
   const ratio = ramRatio(r)
   const n = Math.min(TERM_BAR, Math.max(0, Math.round(ratio * TERM_BAR)))
   const color = ramColor(ratio)

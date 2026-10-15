@@ -52,8 +52,6 @@ export type ProgressBarAgentRun = {
 /** System RAM in use, in bytes, as the RAM card reads it. */
 export type ProgressBarRam = { usedBytes: number; totalBytes: number }
 
-/** The band's transient collapse / expand motion; `token` grows with every new phase. */
-export type ProgressBarAnim = { phase: 'collapsing' | 'expanding' | null; token: number }
 
 declare module 'claude-code' {
   interface PluginState {
@@ -72,12 +70,10 @@ declare module 'claude-code' {
       now: number
       /** Whether the per-agent rows are shown under the main row. */
       isExpanded: boolean
-      /** Whether the band is collapsed to the ring; persisted in `$.store` under `isCollapsed`. */
-      isCollapsed: boolean
       /** System RAM in use, polled every few seconds; null until the first reading or where none can be taken. */
       ram: ProgressBarRam | null
-      /** The desktop's collapse / expand motion, set for 360ms then cleared. */
-      anim: ProgressBarAnim
+      /** Why the last RAM reading failed (every probe tried, e.g. "process.run refused: …", "parse failed"), or null once one succeeds. */
+      ramError: string | null
     }
   }
 }

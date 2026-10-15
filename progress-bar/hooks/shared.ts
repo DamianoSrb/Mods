@@ -233,30 +233,3 @@ export const strHash = (s: string): number => {
   for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193) >>> 0
   return h >>> 0
 }
-
-/** The band's collapse / expand motion, drawn by each Svg of the row. */
-export type RowAnim = 'collapse' | 'expand'
-
-const ANIM_CSS: Record<RowAnim, string> = {
-  collapse:
-    '.pba-x{transform-box:view-box;transform-origin:left center;animation:pbm-collapse .36s ease-in forwards}' +
-    '@keyframes pbm-collapse{from{transform:scaleX(1);opacity:1}to{transform:scaleX(.05);opacity:0}}',
-  expand:
-    '.pba-x{transform-box:view-box;transform-origin:left center;animation:pbm-expand .36s ease-out forwards}' +
-    '@keyframes pbm-expand{from{transform:scaleX(.05);opacity:0}to{transform:scaleX(1);opacity:1}}',
-}
-
-/**
- * Wraps everything inside a root `<svg>` in one group that scales toward (or
- * from) the left edge and fades; no motion under prefers-reduced-motion.
- * No `anim`: the source unchanged.
- */
-export function withAnim(svg: string, anim?: RowAnim): string {
-  if (!anim) return svg
-  const open = svg.indexOf('>') + 1
-  const close = svg.lastIndexOf('</svg>')
-  if (open <= 0 || close < open) return svg
-  const style =
-    `<style>${ANIM_CSS[anim]}` + '@media (prefers-reduced-motion: reduce){.pba-x{animation:none!important}}</style>'
-  return `${svg.slice(0, open)}${style}<g class="pba-x pba-${anim}">${svg.slice(open, close)}</g>${svg.slice(close)}`
-}

@@ -134,68 +134,6 @@ for (const surface of SURFACES) {
   })
 }
 
-// Collapsed: only the ring. The terminal draws no title and one expand Button;
-// the desktop draws one Svg (the ring alone, whose track is `pbr-ks`, with no
-// `pbq-bg` card behind it) under the `collapsed` Client, and no main row.
-const isRingOnly = (text: string, surface: Surface): boolean =>
-  surface === 'terminal'
-    ? !text.includes('Pronto')
-    : text.split('"type":"Svg"').length === 2 && !text.includes('pbq-bg') && text.includes('pbr-ks')
-
-// The control that reopens the collapsed band on each surface.
-const reopenKey = (surface: Surface): string => (surface === 'terminal' ? 'expand' : 'collapsed')
-
-for (const surface of SURFACES) {
-  test(`collapse draws the ring, reopening restores the bar (${surface})`, IT, async ($, on) => {
-    const clock = world(on)
-    mock.store(on)
-    await start($)
-    const ui = await mount($, surface)
-    expect(await shown(ui)).toContain('Pronto')
-
-    // The terminal presses its `‹` Button; the desktop's chevron Client posts to ui.message.
-    if (surface === 'terminal') await ui.press({ key: 'collapse' })
-    else await ui.post({ action: 'collapse' }, { in: 'collapse' })
-    // The desktop first plays the collapse motion, 360ms.
-    await clock.advance(360)
-    const text = await shown(ui)
-    expect(isRingOnly(text, surface)).toBe(true)
-    expect(text).toContain(surface === 'terminal' ? '○' : 'pbr-ks')
-    expect(await ui.find({ key: 'collapse' })).toBeUndefined()
-    expect(await ui.find({ key: 'agents' })).toBeUndefined()
-    expect(await ui.find({ key: reopenKey(surface) })).toBeDefined()
-
-    // The terminal presses its Button; the desktop's Client posts to ui.message.
-    if (surface === 'terminal') await ui.press({ key: 'expand' })
-    else await ui.post({ action: 'expand' }, { in: 'collapsed' })
-    expect(await shown(ui)).toContain('Pronto')
-    expect(await ui.find({ key: reopenKey(surface) })).toBeUndefined()
-    expect(await ui.find({ key: 'collapse' })).toBeDefined()
-  })
-
-  test(`a stored collapse preference starts collapsed (${surface})`, IT, async ($, on) => {
-    world(on)
-    mock.store(on, { isCollapsed: true })
-    await start($)
-    const ui = await mount($, surface)
-    expect(isRingOnly(await shown(ui), surface)).toBe(true)
-    expect(await ui.find({ key: reopenKey(surface) })).toBeDefined()
-    expect(await ui.find({ key: 'collapse' })).toBeUndefined()
-  })
-}
-
-test('collapsed desktop band: the square holds the ring with the percent', IT, async ($, on) => {
-  world(on)
-  mock.store(on, { isCollapsed: true })
-  await start($)
-  await $.tool.call({ tool: 'mcp__progress-bar__progress', title: 'Demo', total: 2, done: 1, phase: 'delegate' })
-  const ui = await mount($, 'desktop')
-  const text = await shown(ui)
-  expect(isRingOnly(text, 'desktop')).toBe(true)
-  expect(text).toMatch(/<circle[^>]*pbr-ks/)
-  expect(text).toContain('>50</text>')
-})
-
 // The Svg sources: each `"source":"<svg …</svg>"` in the drawn tree.
 const svgSources = (text: string): string[] => text.match(/"source":"<svg.*?<\/svg>/g) ?? []
 

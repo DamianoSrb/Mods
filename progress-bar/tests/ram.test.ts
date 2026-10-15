@@ -1,15 +1,36 @@
 import { expect, test } from 'claude-code/testing'
-import { fmtBytes, fmtRamPair, parseRam, ramProbe } from '../hooks/ram'
+import { fmtBytes, fmtRamPair, parseRam, ramProbes } from '../hooks/ram'
 import { RAM_CARD_H, RAM_CARD_W, ramCardSvg } from '../hooks/ram-card'
 
 const GiB = 1024 ** 3
 
-test('probes per platform', () => {
-  expect(ramProbe('win32')).toMatchObject({ kind: 'run' })
-  expect((ramProbe('win32') as { argv: string[] }).argv[0]).toBe('powershell.exe')
-  expect(ramProbe('darwin')).toEqual({ kind: 'run', argv: ['sh', '-c', 'sysctl -n hw.memsize; vm_stat'] })
-  expect(ramProbe('linux')).toEqual({ kind: 'file', path: '/proc/meminfo' })
-  expect(ramProbe('freebsd')).toBe(null)
+test('probes per platform, in the order tried', () => {
+  const win = ramProbes('win32')
+  expect(win.map(p => p.format)).toEqual(['win32', 'wmic'])
+  expect((win[0] as { argv: string[] }).argv[0]).toBe('powershell.exe')
+  expect((win[1] as { argv: string[] }).argv).toEqual([
+    'cmd.exe',
+    '/c',
+    'wmic OS get FreePhysicalMemory,TotalVisibleMemorySize /value',
+  ])
+  expect(ramProbes('darwin')).toEqual([{ kind: 'run', argv: ['sh', '-c', 'sysctl -n hw.memsize; vm_stat'], format: 'darwin' }])
+  expect(ramProbes('linux')).toEqual([{ kind: 'file', path: '/proc/meminfo', format: 'linux' }])
+  expect(ramProbes('freebsd')).toEqual([])
+})
+
+test('wmic /value: KB, either order, CR CR LF', () => {
+  const out = '\r\r\n\r\r\nFreePhysicalMemory=6291456\r\r\nTotalVisibleMemorySize=16777216\r\r\n\r\r\n\r\r\n'
+  expect(parseRam('wmic', out)).toEqual({ totalBytes: 16 * GiB, usedBytes: 10 * GiB })
+  expect(parseRam('wmic', 'TotalVisibleMemorySize=16777216\nFreePhysicalMemory=0\n')).toEqual({
+    totalBytes: 16 * GiB,
+    usedBytes: 16 * GiB,
+  })
+  expect(parseRam('wmic', 'FreePhysicalMemory=6291456\r\n')).toBe(null)
+  expect(parseRam('wmic', 'FreePhysicalMemory=200\r\nTotalVisibleMemorySize=100\r\n')).toBe(null)
+  expect(parseRam('wmic', "'wmic' is not recognized as an internal or external command")).toBe(null)
+  // The PowerShell format is not wmic's, and the reverse.
+  expect(parseRam('wmic', '16777216 6291456')).toBe(null)
+  expect(parseRam('win32', out)).toBe(null)
 })
 
 test('win32: KB total and free, CRLF and spaces', () => {
@@ -69,4 +90,11 @@ test('card svg: null reading', () => {
   const svg = ramCardSvg(null)
   expect(svg).toContain('RAM –')
   expect(svg).not.toContain('pbram-fill')
+})
+
+test('card svg: a failed probe reads RAM ? and says why in its label', () => {
+  const svg = ramCardSvg(null, 120, 30, false, 'process.run refused: not available')
+  expect(svg).toContain('>RAM ?</text>')
+  expect(svg).toContain('aria-label="RAM ? (process.run refused: not available)"')
+  expect(svg).not.toContain('RAM –')
 })

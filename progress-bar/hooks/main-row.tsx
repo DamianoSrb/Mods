@@ -9,7 +9,7 @@
 // sit in fixed slots, so the bar width depends only on the row width.
 // No `$` here.
 import type { MainModel } from './model'
-import { ACCENT, DONE, FONT, IDLE, fitText, mulberry32, noise, savvyClasses, strHash, textWidth, withAnim, xml, type RowAnim, type TerminalUi } from './shared'
+import { ACCENT, DONE, FONT, IDLE, fitText, mulberry32, noise, savvyClasses, strHash, textWidth, xml, type TerminalUi } from './shared'
 
 export const MAIN_H = 30
 
@@ -163,10 +163,9 @@ export const mainRowGeometry = (width: number): { W: number; titleSlot: number; 
 }
 
 /**
- * The row's SVG, `width` × MAIN_H. `anim` plays the band's collapse (scale
- * toward the left edge and fade out) or expand (the reverse) once, in .36s.
+ * The row's SVG, `width` × MAIN_H.
  */
-export function mainRowSvg(m: MainModel, width: number, seed = 0, anim?: RowAnim): string {
+export function mainRowSvg(m: MainModel, width: number, seed = 0): string {
   const { W, titleSlot, barX: BAR_X, barW: BAR_W } = mainRowGeometry(width)
   const H = MAIN_H
   const y0 = (H - BAR_H) / 2
@@ -302,7 +301,7 @@ export function mainRowSvg(m: MainModel, width: number, seed = 0, anim?: RowAnim
     ? `<text class="pbm-m" x="${W - 1}" y="${rightY}" text-anchor="end" font-family="${FONT}" font-size="${RIGHT_SIZE}" font-variant-numeric="tabular-nums" style="font-variant-numeric:tabular-nums">${xml(right)}</text>`
     : ''
 
-  return withAnim(`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
 <style>${savvyClasses('pbm')}${css}${REDUCED}</style>
 <defs><clipPath id="pbm-clip"><rect x="0" y="0" width="${BAR_W}" height="${BAR_H}" rx="${BAR_R}"/></clipPath>${defs}</defs>
 <circle cx="5" cy="${H / 2}" r="3" fill="${dotColor(m)}"/>
@@ -313,7 +312,7 @@ export function mainRowSvg(m: MainModel, width: number, seed = 0, anim?: RowAnim
 ${pill}
 </g>
 ${rightText}
-</svg>`, anim)
+</svg>`
 }
 
 const len = (s: string): number => [...s].length

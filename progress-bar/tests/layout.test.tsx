@@ -17,9 +17,11 @@ const PROPS = {
 }
 
 // The desktop's row geometry, as register.tsx estimates it.
-const MAIN_H = 30
 const GAP_PX = 8
-const rowWOf = (cols: number): number => Math.max(180, Math.min(1600, cols * 8 - 96))
+const RAM_W = 120
+// 24px of safety under the bodyColumns estimate, so the row never wraps.
+const rowWOf = (cols: number): number => Math.max(180, Math.min(1600, cols * 8 - 96 - 24))
+const agentsPxOf = (label: string): number => Math.ceil(label.length * 7.5) + 24
 
 function world(on: On): MockClock {
   const clock = mock.clock(on, { now: 1_000 })
@@ -57,14 +59,12 @@ const spawn = ($: Engine) =>
 // The first row's children, as drawn.
 type Node = {
   type?: string
-  props?: { key?: string; width?: unknown; height?: unknown; source?: unknown; label?: unknown }
+  props?: { key?: string; width?: unknown; height?: unknown; source?: unknown; label?: unknown; alt?: unknown }
   children?: unknown[]
 }
 const kids = (n: unknown): Node[] => ((n as Node)?.children ?? []).filter((c): c is Node => !!c && typeof c === 'object')
 const firstRow = (tree: unknown): Node[] => kids(kids(tree)[0])
 const keyOf = (k: Node | undefined): string => k?.props?.key ?? k?.type ?? '?'
-// Every element under `n` (itself included), depth first.
-const walk = (n: Node | undefined): Node[] => (n ? [n, ...kids(n).flatMap(walk)] : [])
 // The desktop row flattened: the main bar, then the right zone's parts in order.
 const desktopParts = (tree: unknown): Node[] => {
   const [main, zone] = firstRow(tree)
@@ -78,20 +78,52 @@ const roleOf = (n: Node | undefined): string => {
   if (n?.type === 'Svg' && src.includes('pbs-l')) return 'sep'
   if (n?.type === 'Svg' && src.includes('pbram-card')) return 'ram'
   if (n?.type === 'Svg' && src.includes('pbm-k')) return 'main'
-  if (JSON.stringify(n ?? {}).includes('│')) return 'sep'
+  const text = JSON.stringify(n ?? {})
+  if (text.includes('│')) return 'sep'
+  if (text.includes('"RAM')) return 'ram'
   return keyOf(n)
 }
+const ramOf = async (ui: Mounted<Surface, 'AbovePrompt'>): Promise<Node | undefined> =>
+  desktopParts(await ui.drawn()).find(n => roleOf(n) === 'ram')
 
-test('the collapse control ends the row (terminal): the Button keyed collapse', IT, async ($, on) => {
-  world(on)
-  await start($)
-  const ui = await mount($, 'terminal')
-  expect((await ui.find({ key: 'collapse' }))?.type).toBe('Button')
-  const row = firstRow(await ui.drawn())
-  expect(keyOf(row[row.length - 1])).toBe('collapse')
-})
+// A Windows host whose PowerShell answers with `read()` KB free of 16 GiB.
+function winRam(on: On, read: () => number): void {
+  mock.env(on, { OS: 'Windows_NT' })
+  on('process.run', async () => ({
+    value: {
+      exitCode: 0,
+      stdout: `${16 * 1024 * 1024} ${read()}\r\n`,
+      stderr: '',
+      isStdoutTruncated: false,
+      isStderrTruncated: false,
+    },
+  }))
+}
 
-test('terminal row: [main] [agents] │ [RAM] [‹], compact agents label', IT, async ($, on) => {
+// Nothing of the removed collapse feature is drawn on any surface.
+const COLLAPSE_KEYS = ['collapse', 'collapsed', 'collapse-box', 'expand']
+
+for (const surface of SURFACES) {
+  test(`no collapse control or collapsed view, RAM ends the row (${surface})`, IT, async ($, on) => {
+    world(on)
+    await start($)
+    const ui = await mount($, surface)
+    await spawn($)
+    await ui.redraw()
+    for (const key of COLLAPSE_KEYS) expect(await ui.find({ key })).toBeUndefined()
+    const text = await drawn(ui)
+    expect(text).not.toContain('"type":"Client"')
+    expect(text).not.toContain('‹')
+    expect(text).not.toContain('pbc-ch')
+    expect(text).not.toContain('pbr-ks')
+    expect(text).not.toContain('pba-x')
+    const tree = await ui.drawn()
+    const row = surface === 'desktop' ? desktopParts(tree) : firstRow(tree)
+    expect(roleOf(row[row.length - 1])).toBe('ram')
+  })
+}
+
+test('terminal row: [main] [agents] │ [RAM], compact agents label', IT, async ($, on) => {
   world(on)
   await start($)
   const ui = await mount($, 'terminal')
@@ -101,28 +133,13 @@ test('terminal row: [main] [agents] │ [RAM] [‹], compact agents label', IT, 
   const keys = row.map(roleOf)
   expect(keys.indexOf('agents')).toBeGreaterThan(0)
   expect(keys.indexOf('sep')).toBe(keys.indexOf('agents') + 1)
-  expect(keys[keys.length - 1]).toBe('collapse')
+  expect(keys.length).toBe(keys.indexOf('sep') + 2)
+  expect(keys[keys.length - 1]).toBe('ram')
   expect(JSON.stringify(row[keys.indexOf('sep')])).toContain('│')
   expect((await ui.find({ key: 'agents' }))?.props.label).toBe('●▾1 · 0')
 })
 
-test('the collapse control ends the row (desktop): a MAIN_H square under the collapse Client', IT, async ($, on) => {
-  world(on)
-  await start($)
-  const ui = await mount($, 'desktop')
-  expect((await ui.find({ key: 'collapse' }))?.type).toBe('Client')
-  const parts = desktopParts(await ui.drawn())
-  const last = parts[parts.length - 1]
-  expect(keyOf(last)).toBe('collapse-box')
-  expect(walk(last).some(n => n.type === 'Client' && n.props?.key === 'collapse')).toBe(true)
-  const svg = walk(last).find(n => n.type === 'Svg')
-  expect(widthOf(svg)).toBe(MAIN_H)
-  expect(Number(svg?.props?.height)).toBe(MAIN_H)
-  expect(String(svg?.props?.source)).toContain('pbc-ch')
-  expect(String(svg?.props?.source)).toContain(`width="${MAIN_H}" height="${MAIN_H}"`)
-})
-
-test('desktop row without agents: [main] [sep] [RAM] [collapse], main 80% of the row', IT, async ($, on) => {
+test('desktop row without agents: [main] [sep] [RAM 120px], main takes the rest', IT, async ($, on) => {
   world(on)
   await start($)
   const ui = await mount($, 'desktop')
@@ -130,185 +147,65 @@ test('desktop row without agents: [main] [sep] [RAM] [collapse], main 80% of the
   const outer = kids(tree)[0]
   expect((outer?.props as { justifyContent?: string })?.justifyContent).toBe('space-between')
   const parts = desktopParts(tree)
-  expect(parts.map(roleOf)).toEqual(['main', 'sep', 'ram', 'collapse-box'])
+  expect(parts.map(roleOf)).toEqual(['main', 'sep', 'ram'])
   const rowW = rowWOf(100)
+  expect(rowW).toBeGreaterThanOrEqual(500)
   const [main, sep, ram] = parts
-  expect(Math.abs(widthOf(main) - Math.round(rowW * 0.8))).toBeLessThanOrEqual(2)
   expect(widthOf(sep)).toBe(1)
   expect(Number(sep?.props?.height)).toBe(18)
   expect(String(sep?.props?.source)).toContain('#e4e4e1')
   expect(String(sep?.props?.source)).toContain('#333331')
-  // The parts and the gaps fill the row exactly: main + gap + sep + gap + RAM + gap + collapse.
-  expect(widthOf(main) + widthOf(sep) + widthOf(ram) + MAIN_H + 3 * GAP_PX).toBe(rowW)
-  expect(String(ram?.props?.source)).toContain(`width="${widthOf(ram)}" height="30"`)
-  // A zone under 150px shows the RAM as a percent only.
-  expect(rowW - widthOf(main)).toBeLessThan(150)
-  expect(String(ram?.props?.source)).not.toContain('pbram-track')
+  expect(widthOf(ram)).toBe(RAM_W)
+  expect(String(ram?.props?.source)).toContain(`width="${RAM_W}" height="30"`)
+  // main + gap + sep + gap + RAM: exactly the (conservative) row.
+  expect(widthOf(main) + GAP_PX + 1 + GAP_PX + RAM_W).toBe(rowW)
 })
 
-test('desktop row with agents: [main] [agents] [sep] [RAM] [collapse], fitting the row', IT, async ($, on) => {
-  world(on)
+for (const cols of [100, 150, 200]) {
+  test(`desktop row with agents at ${cols} cols: RAM keeps 120px at the far right`, IT, async ($, on) => {
+    world(on)
+    await start($)
+    const ui = await mount($, 'desktop', { bodyColumns: cols })
+    await spawn($)
+    await ui.redraw()
+    const parts = desktopParts(await ui.drawn())
+    expect(parts.map(roleOf)).toEqual(['main', 'agents', 'sep', 'ram'])
+    expect(parts[1]?.props?.label).toBe('●▾1 · 0')
+    const rowW = rowWOf(cols)
+    expect(rowW).toBeGreaterThanOrEqual(500)
+    expect(widthOf(parts[3])).toBe(RAM_W)
+    expect(String(parts[3]?.props?.source)).toContain('pbram-card')
+    // main + gap + agents + gap + sep + gap + RAM = row.
+    expect(widthOf(parts[0]) + GAP_PX + agentsPxOf('●▾1 · 0') + GAP_PX + 1 + GAP_PX + RAM_W).toBe(rowW)
+  })
+}
+
+test('desktop row under 500px: a 72px percent-only RAM card, still present', IT, async ($, on) => {
+  const c = world(on)
+  winRam(on, () => 8 * 1024 * 1024)
   await start($)
-  const cols = 150
+  await c.settle()
+  const cols = 60
   const ui = await mount($, 'desktop', { bodyColumns: cols })
   await spawn($)
   await ui.redraw()
   const parts = desktopParts(await ui.drawn())
-  expect(parts.map(roleOf)).toEqual(['main', 'agents', 'sep', 'ram', 'collapse-box'])
-  expect(parts[1]?.props?.label).toBe('●▾1 · 0')
+  expect(parts.map(roleOf)).toEqual(['main', 'agents', 'sep', 'ram'])
   const rowW = rowWOf(cols)
-  expect(Math.abs(widthOf(parts[0]) - Math.round(rowW * 0.8))).toBeLessThanOrEqual(2)
-  const agentsPx = Math.ceil('●▾1 · 0'.length * 7.5) + 24
-  expect(widthOf(parts[0]) + agentsPx + 1 + widthOf(parts[3]) + MAIN_H + 4 * GAP_PX).toBe(rowW)
-})
-
-test('desktop: collapsing plays the motion for 360ms, then the band collapses', IT, async ($, on) => {
-  const clock = world(on)
-  mock.store(on)
-  await start($)
-  const ui = await mount($, 'desktop')
-  expect(await drawn(ui)).not.toContain('pbm-collapse')
-  await ui.post({ action: 'collapse' }, { in: 'collapse' })
-  // Still the row, every Svg of it scaling out toward the left.
-  let text = await drawn(ui)
-  expect(await ui.find({ key: 'collapse' })).toBeDefined()
-  expect(await ui.find({ key: 'collapsed' })).toBeUndefined()
-  for (const p of desktopParts(await ui.drawn()).flatMap(walk).filter(n => n.type === 'Svg')) {
-    expect(String(p.props?.source)).toContain('animation:pbm-collapse .36s ease-in forwards')
-  }
-  expect(text).toContain('transform-origin:left center')
-  expect(text).toContain('prefers-reduced-motion')
-
-  await clock.advance(359)
-  expect(await ui.find({ key: 'collapsed' })).toBeUndefined()
-  await clock.advance(1)
-  expect(await ui.find({ key: 'collapsed' })).toBeDefined()
-  expect(await ui.find({ key: 'collapse' })).toBeUndefined()
-  text = await drawn(ui)
-  expect(text).not.toContain('pbm-collapse')
-})
-
-test('desktop: expanding reopens at once with the motion, cleared after 360ms', IT, async ($, on) => {
-  const clock = world(on)
-  mock.store(on, { isCollapsed: true })
-  await start($)
-  const ui = await mount($, 'desktop')
-  await ui.post({ action: 'expand' }, { in: 'collapsed' })
-  expect(await ui.find({ key: 'collapse' })).toBeDefined()
-  expect(await ui.find({ key: 'collapsed' })).toBeUndefined()
-  expect(await drawn(ui)).toContain('animation:pbm-expand .36s ease-out forwards')
-  await clock.advance(360)
-  const text = await drawn(ui)
-  expect(text).not.toContain('pbm-expand')
-  expect(text).not.toContain('pba-x')
-  // A later redraw does not replay it.
-  await clock.advance(2_000)
-  await ui.redraw()
-  expect(await drawn(ui)).not.toContain('pbm-expand')
-})
-
-test('desktop: a stale collapse timer never ends a newer phase', IT, async ($, on) => {
-  const clock = world(on)
-  mock.store(on)
-  await start($)
-  const ui = await mount($, 'desktop')
-  await ui.post({ action: 'collapse' }, { in: 'collapse' })
-  await clock.advance(200)
-  // Reopened mid-collapse: the expand motion takes over.
-  await ui.post({ action: 'expand' }, { in: 'collapse' })
-  expect(await drawn(ui)).toContain('pbm-expand')
-  await clock.advance(200)
-  // The collapse timer came due at 360ms: ignored.
-  expect(await ui.find({ key: 'collapsed' })).toBeUndefined()
-  expect(await drawn(ui)).toContain('pbm-expand')
-  await clock.advance(160)
-  expect(await ui.find({ key: 'collapse' })).toBeDefined()
-  expect(await drawn(ui)).not.toContain('pbm-expand')
-})
-
-test('desktop: a press on the collapse Client collapses the band', IT, async ($, on) => {
-  const clock = world(on)
-  mock.store(on)
-  await start($)
-  const ui = await mount($, 'desktop')
-  await ui.pointer({ type: 'down', x: 0, y: 0, button: 'left', in: 'collapse' })
-  await ui.pointer({ type: 'up', x: 0, y: 0, button: 'left', in: 'collapse' })
-  await clock.advance(360)
-  expect(await ui.find({ key: 'collapsed' })).toBeDefined()
-})
-
-test('collapsed desktop: only the ring, MAIN_H square, right-aligned, no card', IT, async ($, on) => {
-  world(on)
-  mock.store(on, { isCollapsed: true })
-  await start($)
-  const ui = await mount($, 'desktop')
-  expect(await ui.find({ key: 'collapsed' })).toBeDefined()
-  expect(await ui.find({ key: 'expand' })).toBeUndefined()
-  expect(await ui.find({ key: 'collapse' })).toBeUndefined()
-  const tree = await ui.drawn()
-  const outer = kids(tree)[0] ?? (tree as Node)
-  const text = JSON.stringify(tree)
-  expect(text).not.toContain('pbq-bg')
-  expect(text).not.toContain('<rect')
-  expect(text).toContain('pbr-ks')
-  expect(JSON.stringify((tree as Node).props ?? outer.props)).toContain('flex-end')
-  const svgs = walk(tree as Node).filter(n => n.type === 'Svg')
-  expect(svgs).toHaveLength(1)
-  expect(widthOf(svgs[0])).toBe(MAIN_H)
-  expect(Number(svgs[0]?.props?.height)).toBe(MAIN_H)
-  expect(String(svgs[0]?.props?.source)).toContain('viewBox="0 0 32 32"')
-})
-
-test('collapsed desktop: a press on the ring reopens the bar with the expand motion', IT, async ($, on) => {
-  world(on)
-  mock.store(on, { isCollapsed: true })
-  await start($)
-  const ui = await mount($, 'desktop')
-  await ui.pointer({ type: 'down', x: 0, y: 0, button: 'left', in: 'collapsed' })
-  await ui.pointer({ type: 'up', x: 0, y: 0, button: 'left', in: 'collapsed' })
-  expect(await ui.find({ key: 'collapse' })).toBeDefined()
-  expect(await ui.find({ key: 'collapsed' })).toBeUndefined()
-  expect(await drawn(ui)).toContain('pbm-expand')
-})
-
-test('collapsed desktop: a direct ui.message from the square expands', IT, async ($, on) => {
-  world(on)
-  mock.store(on, { isCollapsed: true })
-  await start($)
-  const ui = await mount($, 'desktop')
-  await ui.post({ action: 'something-else' }, { in: 'collapsed' })
-  expect(await ui.find({ key: 'collapsed' })).toBeDefined()
-  await ui.post({ action: 'expand' }, { in: 'collapsed' })
-  expect(await ui.find({ key: 'collapse' })).toBeDefined()
-})
-
-test('collapsed terminal: one expand Button labelled with the ring glyph', IT, async ($, on) => {
-  world(on)
-  mock.store(on, { isCollapsed: true })
-  await start($)
-  await $.tool.call({ tool: 'mcp__progress-bar__progress', title: 'Demo', total: 2, done: 1, phase: 'delegate' })
-  const ui = await mount($, 'terminal')
-  expect((await ui.find({ key: 'expand' }))?.props.label).toBe('◑ 50%')
-  await ui.press({ key: 'expand' })
-  expect(await ui.find({ key: 'collapse' })).toBeDefined()
+  expect(rowW).toBeLessThan(500)
+  expect(widthOf(parts[3])).toBe(72)
+  const src = String(parts[3]?.props?.source)
+  expect(src).toContain('>50%</text>')
+  expect(src).not.toContain('pbram-track')
+  expect(widthOf(parts[0]) + GAP_PX + agentsPxOf('●▾1 · 0') + GAP_PX + 1 + GAP_PX + 72).toBe(rowW)
 })
 
 test('the RAM poll writes the ram atom (Windows probe mocked)', IT, async ($, on) => {
   const c = world(on)
-  mock.env(on, { OS: 'Windows_NT' })
   let free = 8 * 1024 * 1024
-  on('process.run', async () => ({
-    value: {
-      exitCode: 0,
-      stdout: `${16 * 1024 * 1024} ${free}\r\n`,
-      stderr: '',
-      isStdoutTruncated: false,
-      isStderrTruncated: false,
-    },
-  }))
+  winRam(on, () => free)
   await start($)
   await c.settle()
-  // A wide row, so the RAM card has room for the pair.
   const ui = await mount($, 'desktop', { bodyColumns: 200 })
   expect(await drawn(ui)).toContain('8/16 GB')
   const t = await mount($, 'terminal')
@@ -317,4 +214,81 @@ test('the RAM poll writes the ram atom (Windows probe mocked)', IT, async ($, on
   free = 4 * 1024 * 1024
   await c.advance(5_000)
   expect(await drawn(ui)).toContain('12/16 GB')
+})
+
+test('PowerShell refused: the wmic fallback reads the RAM', IT, async ($, on) => {
+  const c = world(on)
+  mock.env(on, { OS: 'Windows_NT' })
+  const asked: string[] = []
+  on('process.run', async (_, e) => {
+    asked.push(e.argv[0] ?? '')
+    if (e.argv[0] === 'powershell.exe') return { deny: 'not on this surface' }
+    return {
+      value: {
+        exitCode: 0,
+        stdout: '\r\r\nFreePhysicalMemory=4194304\r\r\nTotalVisibleMemorySize=16777216\r\r\n',
+        stderr: '',
+        isStdoutTruncated: false,
+        isStderrTruncated: false,
+      },
+    }
+  })
+  await start($)
+  await c.settle()
+  const ui = await mount($, 'desktop')
+  const text = await drawn(ui)
+  expect(text).toContain('12/16 GB')
+  expect(text).not.toContain('RAM ?')
+  expect(asked).toEqual(['powershell.exe', 'cmd.exe'])
+  // The probe that worked is tried first from then on.
+  await c.advance(5_000)
+  expect(asked.slice(2)).toEqual(['cmd.exe'])
+})
+
+test('every probe failing: RAM ? with the reason in alt, logged once', IT, async ($, on) => {
+  const c = world(on)
+  mock.env(on, { OS: 'Windows_NT' })
+  const logs: string[] = []
+  on('ui.log', async (_, e, next) => {
+    logs.push(e.text)
+    return next(e)
+  })
+  on('process.run', async (_, e) => {
+    if (e.argv[0] === 'powershell.exe') return { deny: 'blocked' }
+    return {
+      value: { exitCode: 1, stdout: '', stderr: 'wmic: not found', isStdoutTruncated: false, isStderrTruncated: false },
+    }
+  })
+  await start($)
+  await c.settle()
+  const ui = await mount($, 'desktop')
+  const ram = await ramOf(ui)
+  expect(widthOf(ram)).toBe(RAM_W)
+  expect(String(ram?.props?.source)).toContain('>RAM ?</text>')
+  const alt = String(ram?.props?.alt)
+  expect(alt).toContain('RAM ?')
+  expect(alt).toContain('process.run refused')
+  expect(alt).toContain('cmd.exe exit 1: wmic: not found')
+  const t = await mount($, 'terminal')
+  expect(await drawn(t)).toContain('RAM ?')
+
+  await c.advance(15_000)
+  const ramLogs = logs.filter(l => l.includes('RAM unavailable'))
+  expect(ramLogs).toHaveLength(1)
+  expect(ramLogs[0]).toContain('process.run refused')
+})
+
+test('linux: /proc/meminfo through fs.read; a later parse failure keeps the value', IT, async ($, on) => {
+  const c = world(on)
+  let text = 'MemTotal:       16777216 kB\nMemAvailable:    8388608 kB\n'
+  on('fs.read', async () => ({ value: text }))
+  await start($)
+  await c.settle()
+  const ui = await mount($, 'desktop')
+  expect(await drawn(ui)).toContain('8/16 GB')
+  text = 'nonsense'
+  await c.advance(5_000)
+  const ram = await ramOf(ui)
+  expect(String(ram?.props?.source)).toContain('8/16 GB')
+  expect(String(ram?.props?.alt)).toContain('parse failed (linux)')
 })

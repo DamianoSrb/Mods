@@ -1,6 +1,6 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
-import type { ProgressBarAnim, ProgressBarPhase, ProgressBarPlannedTask } from '../types'
+import type { ProgressBarPhase, ProgressBarPlannedTask } from '../types'
 import {
   agentsSummary,
   buildAgentRows,
@@ -8,13 +8,11 @@ import {
   type AgentRowModel,
   type AgentRun,
   type Flow,
-  type MainModel,
 } from './model'
-import { ACCENT, DONE, STRINGS, fmtTokens, pickLang, withAnim, type Lang, type RowAnim, type TerminalUi } from './shared'
+import { STRINGS, fmtTokens, pickLang, type Lang, type TerminalUi } from './shared'
 import { MAIN_H, mainRowSvg, mainRowTerminal } from './main-row'
 import { AGENT_ROW_H, agentRowSvg, agentRowTerminal } from './agent-rows'
-import { RING_SIZE, ringSvg } from './ring'
-import { RAM_POLL_MS, fmtRamPair, parseRam, ramProbe, type RamInfo } from './ram'
+import { RAM_POLL_MS, fmtRamPair, parseRam, ramProbes, type RamInfo, type RamProbe } from './ram'
 import { ramCardSvg, ramCardTerminal } from './ram-card'
 
 // This mod's own values; it tracks everything itself.
@@ -25,60 +23,38 @@ const endedAt = atom({ plugin: 'progress-bar', key: 'endedAt' } as const, null)
 const tools = atom({ plugin: 'progress-bar', key: 'tools' } as const, 0)
 const now = atom({ plugin: 'progress-bar', key: 'now' } as const, 0)
 const isExpanded = atom({ plugin: 'progress-bar', key: 'isExpanded' } as const, false)
-// Mirrors the `isCollapsed` preference in `$.store`, which keeps it between sessions.
-const isCollapsed = atom({ plugin: 'progress-bar', key: 'isCollapsed' } as const, false)
-const COLLAPSED_KEY = 'isCollapsed'
 // System RAM in use, polled every RAM_POLL_MS; null until the first reading.
 const ram = atom({ plugin: 'progress-bar', key: 'ram' } as const, null as RamInfo | null)
-
-// The desktop's collapse / expand motion: a transient phase lasting ANIM_MS.
-// `token` grows on every new phase, so a stale timer never ends a newer one.
-const anim = atom({ plugin: 'progress-bar', key: 'anim' } as const, { phase: null, token: 0 } as ProgressBarAnim)
-const ANIM_MS = 360
-
-async function setCollapsed($: EngineInterface, value: boolean): Promise<void> {
-  await update($, isCollapsed, () => value)
-  try {
-    await $.store.set(COLLAPSED_KEY, value)
-  } catch {
-    // No store: the preference lasts for this session only.
-  }
-}
-
-/** Starts `phase`, then after ANIM_MS runs `end` and clears it, unless a newer phase began. */
-async function startPhase($: EngineInterface, phase: 'collapsing' | 'expanding', end: () => Promise<void>): Promise<void> {
-  const st = await update($, anim, p => ({ phase, token: (p?.token ?? 0) + 1 }))
-  const token = st?.token ?? 0
-  $.clock.after(ANIM_MS, () => {
-    void (async () => {
-      if ((await read($, anim))?.token !== token) return
-      await end()
-      await update($, anim, p => (p?.token === token ? { phase: null, token } : p))
-    })().catch(() => {})
-  })
-}
-
-/** Desktop collapse: the row animates out leftwards for ANIM_MS, then the band collapses. */
-async function requestCollapse($: EngineInterface): Promise<void> {
-  if ((await read($, isCollapsed)) === true) return
-  if ((await read($, anim))?.phase === 'collapsing') return
-  await startPhase($, 'collapsing', () => setCollapsed($, true))
-}
-
-/** Desktop expand: the band reopens at once and the row animates in for ANIM_MS. */
-async function requestExpand($: EngineInterface): Promise<void> {
-  const ph = (await read($, anim))?.phase ?? null
-  if ((await read($, isCollapsed)) !== true && ph !== 'collapsing') return
-  await setCollapsed($, false)
-  await startPhase($, 'expanding', async () => {})
-}
+// Why the last RAM reading failed (every probe tried), or null once one succeeds.
+const ramError = atom({ plugin: 'progress-bar', key: 'ramError' } as const, null as string | null)
 
 // ---------------------------------------------------------------------------
 // System RAM: the platform found once per load, then a poll that never overlaps.
 
-// Module scope is fine: neither is drawn, and session.start sets them again on (re)load.
+// Module scope is fine: none is drawn, and session.start sets them again on (re)load.
 let ramPlatform: string | null = null
 let isRamPolling = false
+// The probe that last worked: tried first on the next poll.
+let ramProbeIndex = 0
+// The failure reason goes to the transcript once per load, not every 5s.
+let isRamErrorLogged = false
+
+function logRamErrorOnce($: EngineInterface, reason: string): void {
+  if (isRamErrorLogged) return
+  isRamErrorLogged = true
+  try {
+    // Declared on every surface in the d.ts; the validator forbids probing `$.ui` as a value.
+    $.ui.log(`progress-bar: RAM unavailable: ${reason}`)
+  } catch {
+    // No transcript here: the card's alt still says why.
+  }
+}
+
+async function setRamError($: EngineInterface, reason: string): Promise<void> {
+  const text = reason.trim().slice(0, 160) || 'failed'
+  if ((await read($, ramError)) !== text) await update($, ramError, () => text)
+  logRamErrorOnce($, text)
+}
 
 async function detectPlatform($: EngineInterface): Promise<string | null> {
   try {
@@ -106,56 +82,69 @@ const isRamChanged = (prev: RamInfo | null, next: RamInfo): boolean =>
   prev.totalBytes !== next.totalBytes ||
   Math.abs(prev.usedBytes - next.usedBytes) >= next.totalBytes * 0.01
 
+/** One probe's reading, or why it gave none. */
+async function readProbe($: EngineInterface, probe: RamProbe): Promise<RamInfo | string> {
+  let output: string
+  if (probe.kind === 'run') {
+    let res: { exitCode: number; stdout: string; stderr: string }
+    try {
+      res = await $.process.run(probe.argv, { timeoutMs: 4000 })
+    } catch (err) {
+      return `process.run refused: ${errorText(err)} (${probe.argv[0]})`
+    }
+    if (res.exitCode !== 0) {
+      const why = (res.stderr || res.stdout || '').trim().split(/\r?\n/)[0]?.slice(0, 80) ?? ''
+      return `${probe.argv[0]} exit ${res.exitCode}${why ? `: ${why}` : ''}`
+    }
+    output = res.stdout
+  } else {
+    try {
+      output = await $.fs.read(probe.path)
+    } catch (err) {
+      return `fs.read refused: ${errorText(err)} (${probe.path})`
+    }
+  }
+  return parseRam(probe.format, output) ?? `parse failed (${probe.format})`
+}
+
 async function pollRam($: EngineInterface): Promise<void> {
-  const probe = ramPlatform ? ramProbe(ramPlatform) : null
-  if (!ramPlatform || !probe || isRamPolling) return
+  if (isRamPolling) return
+  if (!ramPlatform) {
+    await setRamError($, 'platform not detected')
+    return
+  }
+  const probes = ramProbes(ramPlatform)
+  if (probes.length === 0) {
+    await setRamError($, `no probe for ${ramPlatform}`)
+    return
+  }
   isRamPolling = true
   try {
-    const output =
-      probe.kind === 'run'
-        ? (await $.process.run(probe.argv, { timeoutMs: 4000 })).stdout
-        : await $.fs.read(probe.path)
-    const next = parseRam(ramPlatform, output)
-    if (!next) return
-    const prev = (await read($, ram)) ?? null
-    if (isRamChanged(prev, next)) await update($, ram, () => next)
-  } catch {
-    // A failed reading keeps the last value.
+    // The probe that worked last time first, then the rest in their order.
+    const first = Math.min(ramProbeIndex, probes.length - 1)
+    const order = [first, ...probes.map((_, i) => i).filter(i => i !== first)]
+    const reasons: string[] = []
+    for (const i of order) {
+      const probe = probes[i]
+      if (!probe) continue
+      const got = await readProbe($, probe)
+      if (typeof got === 'string') {
+        reasons.push(got)
+        continue
+      }
+      ramProbeIndex = i
+      if ((await read($, ramError)) !== null) await update($, ramError, () => null)
+      const prev = (await read($, ram)) ?? null
+      if (isRamChanged(prev, got)) await update($, ram, () => got)
+      return
+    }
+    // Every probe failed: the last value (if any) stays, the reason is shown.
+    await setRamError($, reasons.join('; '))
+  } catch (err) {
+    await setRamError($, errorText(err)).catch(() => {})
   } finally {
     isRamPolling = false
   }
-}
-
-// ---------------------------------------------------------------------------
-// The collapsed band.
-
-const quarter = (p: number): string => (p <= 12 ? '○' : p < 38 ? '◔' : p < 63 ? '◑' : p < 88 ? '◕' : '●')
-
-/** The ring as one line of text (the terminal's collapsed control): glyph, percent, color. */
-function ringGlyph(m: MainModel): { text: string; color: string | null } {
-  if (m.isDone) return { text: `● ${m.ringPercent ?? 100}%`, color: DONE }
-  if (m.mode === 'flow' && m.ringPercent !== null)
-    return { text: `${quarter(m.ringPercent)} ${m.ringPercent}%`, color: ACCENT }
-  if (m.mode === 'working') return { text: '◌ …', color: ACCENT }
-  return { text: '○', color: null }
-}
-
-// The desktop's collapsed band is the ring alone, MAIN_H square (its 32px
-// viewBox scaled to fit), no card behind it; a transparent `Client` over it takes the click.
-
-// The expanded row's collapse control on the desktop: a MAIN_H square with a
-// large `‹` chevron, bigger than a Button can draw; a `Client` laid over it takes the click.
-const CHEVRON = MAIN_H
-
-function collapseSvg(): string {
-  return (
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${CHEVRON}" height="${CHEVRON}" viewBox="0 0 ${CHEVRON} ${CHEVRON}">` +
-    '<style>.pbc-bg{fill:#f4f3f0;stroke:#e4e4e1}.pbc-ch{stroke:#6b6b68}' +
-    '@media (prefers-color-scheme: dark){.pbc-bg{fill:#262625;stroke:#333331}.pbc-ch{stroke:#a8a8a4}}</style>' +
-    `<rect class="pbc-bg" x="0.5" y="0.5" width="${CHEVRON - 1}" height="${CHEVRON - 1}" rx="8" stroke-width="1"/>` +
-    '<path class="pbc-ch" d="M17.5 8.5L11 15l6.5 6.5" fill="none" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>' +
-    '</svg>'
-  )
 }
 
 // The thin vertical line between the agents control and the RAM card.
@@ -171,14 +160,38 @@ function separatorSvg(): string {
   )
 }
 
+// The desktop row: [main bar] [agents?] [sep] [RAM card], the RAM card flush
+// right at a fixed width. The desktop puts ~GAP_PX between siblings.
+const GAP_PX = 8
+// The row width is estimated from bodyColumns; ROW_SAFETY_PX more is held back
+// so an estimate a little wide never makes the row wrap.
+const ROW_SAFETY_PX = 24
+const RAM_W = 120
+// Under PCT_ONLY_BELOW px of row, the RAM card shrinks to RAM_PCT_W and shows the percent only.
+const PCT_ONLY_BELOW = 500
+const RAM_PCT_W = 72
+const MAIN_MIN = 60
+const RAM_MIN = 40
+
+type RowGeometry = { rowW: number; mainW: number; ramW: number; agentsPx: number; isRamPctOnly: boolean }
+
+/** Widths of the desktop row for `cols` body columns and an agents label of `agentsLen` characters (0: none). */
+function desktopRowGeometry(cols: number, agentsLen: number): RowGeometry {
+  const rowW = Math.max(180, Math.min(1600, cols * 8 - 96 - ROW_SAFETY_PX))
+  const agentsPx = agentsLen > 0 ? Math.ceil(agentsLen * 7.5) + 24 : 0
+  const isRamPctOnly = rowW < PCT_ONLY_BELOW
+  // Everything but the main bar: the main–zone gap, then agents + gap, sep + gap.
+  const fixed = GAP_PX + (agentsPx ? agentsPx + GAP_PX : 0) + SEP_W + GAP_PX
+  let ramW = isRamPctOnly ? RAM_PCT_W : RAM_W
+  // Only on a very narrow row: the RAM card gives way (to RAM_MIN) before the main bar drops under MAIN_MIN.
+  if (rowW - fixed - ramW < MAIN_MIN) ramW = Math.max(RAM_MIN, rowW - fixed - MAIN_MIN)
+  const mainW = Math.max(RAM_MIN, rowW - fixed - ramW)
+  return { rowW, mainW, ramW, agentsPx, isRamPctOnly }
+}
+
 /** The agents control's label: `▾3 · 45k`, `▴` when open, a `●` first while any runs. */
 const agentsLabelOf = (sum: { count: number; tokens: number; running: number }, isOpen: boolean): string =>
   `${sum.running > 0 ? '●' : ''}${isOpen ? '▴' : '▾'}${sum.count} · ${fmtTokens(sum.tokens)}`
-
-// Set when the desktop reports a `Client` of this band (the collapsed square's
-// or the collapse control's) failed: the band then falls back to Buttons
-// (the ring and `›`, or `‹`). Per load.
-let isClientFailed = false
 
 // The tools this mod registers and serves.
 const TOOL = 'mcp__progress-bar__progress'
@@ -349,14 +362,6 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     lang = await detectLang($, options.language)
-    try {
-      const stored = await $.store.get(COLLAPSED_KEY)
-      await update($, isCollapsed, () => stored === true)
-    } catch {
-      // No store: start expanded.
-    }
-    // A (re)load cancels pending timers: never leave a motion phase hanging.
-    await update($, anim, p => ({ phase: null, token: (p?.token ?? 0) + 1 }))
 
     await $.tool.register({
       name: 'progress',
@@ -421,11 +426,13 @@ export const register: Register = (on, options) => {
 
     // The RAM card: the platform found once, then a reading now and every
     // RAM_POLL_MS. Unawaited, so a slow probe never holds the session's start.
+    // With no platform or no probe for it, the first poll records why and no interval starts.
     isRamPolling = false
+    ramProbeIndex = 0
     void (async () => {
       ramPlatform = await detectPlatform($)
-      if (!ramPlatform || !ramProbe(ramPlatform)) return
       await pollRam($)
+      if (!ramPlatform || ramProbes(ramPlatform).length === 0) return
       $.clock.every(RAM_POLL_MS, () => {
         void pollRam($).catch(() => {})
       })
@@ -605,54 +612,13 @@ export const register: Register = (on, options) => {
     const end = await read($, endedAt)
     const toolCount = await read($, tools)
     const expanded = await read($, isExpanded)
-    const collapsed = (await read($, isCollapsed)) === true
     const at = Math.max(await read($, now), start ?? 0)
 
     const m = buildMainModel({ flow: f, isWorking: e.props.isWorking, startedAt: start, endedAt: end, tools: toolCount, now: at }, s)
     const alt = [m.title, m.pill, m.right].filter(Boolean).join(' · ')
 
     const ramInfo = (await read($, ram)) ?? null
-    const phase = (await read($, anim))?.phase ?? null
-    const isTerminal = e.surface === 'terminal'
-
-    // Collapsed: the band is one control holding the ring; pressing it reopens the bar.
-    if (collapsed) {
-      const reopen = () => (isTerminal ? setCollapsed($, false) : requestExpand($))
-      // Desktop: the ring alone (Svg), right-aligned, with a transparent
-      // `Client` laid over it that takes the click (a Svg has no press, a Button holds only text).
-      if (!isTerminal && 'Svg' in ui && 'Client' in ui && !isClientFailed) {
-        const { Svg, Client } = ui
-        return (
-          <Box flexDirection="row" alignItems="center" justifyContent="flex-end" width="100%">
-            <Box key="collapsed-square" position="relative">
-              <Svg source={ringSvg(m, MAIN_H)} width={MAIN_H} height={MAIN_H} alt={alt} />
-              <Box position="absolute" top={0} left={0} right={0} bottom={0}>
-                <Client key="collapsed" module="./collapsed-client.tsx" props={{ alt }} width="100%" height="100%" />
-              </Box>
-            </Box>
-          </Box>
-        )
-      }
-      // Other remote surfaces (no Client), or a Client that failed: the ring and a `›` Button.
-      if (e.surface !== 'terminal' && 'Svg' in ui) {
-        const { Svg } = ui
-        return (
-          <Box flexDirection="row" alignItems="center" justifyContent="flex-end" width="100%" gap={1}>
-            <Svg source={ringSvg(m)} width={RING_SIZE} height={RING_SIZE} alt={alt} />
-            <Button key="expand" label="›" plain onPress={reopen} />
-          </Box>
-        )
-      }
-      // Terminal: one Button whose label is the ring glyph.
-      const g = ringGlyph(m)
-      return (
-        <Box flexDirection="row" justifyContent="flex-end" width="100%">
-          <Button key="expand" label={g.text} plain onPress={reopen}>
-            {g.color ? <Text color={g.color}>{g.text}</Text> : <Text dimColor>{g.text}</Text>}
-          </Button>
-        </Box>
-      )
-    }
+    const ramErr = (await read($, ramError)) ?? null
 
     const rowsAt = Math.max(at, ...list.map(a => a.startedAt))
     const rows = expanded ? buildAgentRows(list, rowsAt) : []
@@ -661,18 +627,6 @@ export const register: Register = (on, options) => {
     const agentsLabel = agentsLabelOf(agentsSummary(list), expanded === true)
     const agentsButton =
       list.length > 0 ? <Button key="agents" label={agentsLabel} plain onPress={() => update($, isExpanded, v => !v)} /> : null
-    // The collapse control ends the row. Terminal (and desktop fallback): a `‹` Button.
-    const COLLAPSE_LABEL = '‹'
-    const collapseButton = (
-      <Button
-        key="collapse"
-        label={COLLAPSE_LABEL}
-        plain
-        onPress={() => (isTerminal ? setCollapsed($, true) : requestCollapse($))}
-      >
-        <Text bold>{COLLAPSE_LABEL}</Text>
-      </Button>
-    )
 
     // Main row plus agent rows fit in maxRows; when cut, the last line says how many more.
     const avail = Math.max(0, (e.props.maxRows || 0) - 1)
@@ -681,87 +635,43 @@ export const register: Register = (on, options) => {
     const moreLine = isCut && avail >= 1 ? `+${rows.length - shown.length} ${s.more}` : ''
 
     const rowAlt = (r: AgentRowModel): string => `${r.title}: ${r.status}, ${r.stat}, ${r.tokens} ${s.tok}, ${r.time}`
-    const ramAlt = ramInfo ? `RAM ${fmtRamPair(ramInfo)}` : 'RAM'
+    const ramAlt = ramInfo
+      ? `RAM ${fmtRamPair(ramInfo)}${ramErr ? ` (last reading; ${ramErr})` : ''}`
+      : ramErr
+        ? `RAM ? (${ramErr})`
+        : 'RAM'
 
     // By surface, not by table: the terminal draws text even where a table lists Svg.
     if (e.surface !== 'terminal' && 'Svg' in ui) {
       const { Svg } = ui
       const cols = e.props.bodyColumns || 100
-      // [main bar: 80% of the row] [right zone: agents? · │ · RAM · collapse],
-      // the zone flush right. The desktop puts ~GAP_PX between siblings; the
-      // zone's parts are sized to fill exactly what the main bar and the gaps leave.
-      const GAP_PX = 8
-      const RAM_MIN = 32
-      const ZONE_PCT_ONLY = 150
-      const rowW = Math.max(180, Math.min(1600, cols * 8 - 96))
-      const agentsPx = agentsButton ? Math.ceil(agentsLabel.length * 7.5) + 24 : 0
-      const mainW0 = Math.round(rowW * 0.8)
-      // The zone's fixed parts and the gaps among them (sep and collapse, agents when shown).
-      const fixedParts = agentsPx + SEP_W + CHEVRON
-      const fixedCount = (agentsButton ? 1 : 0) + 2
-      // With the RAM card: one more part and one more gap; the main–zone gap counts too.
-      const ramW0 = rowW - mainW0 - GAP_PX - fixedParts - fixedCount * GAP_PX
-      const hasRam = ramW0 >= RAM_MIN
-      const used = fixedParts + (fixedCount - 1 + (hasRam ? 1 : 0)) * GAP_PX + (hasRam ? RAM_MIN : 0)
-      // The main bar keeps 80% unless the zone's fixed parts would not fit, never wrapping.
-      const mainW = Math.max(60, Math.min(mainW0, rowW - GAP_PX - used))
-      const ramW = hasRam ? rowW - mainW - GAP_PX - fixedParts - fixedCount * GAP_PX : 0
-      const isRamPctOnly = rowW - mainW < ZONE_PCT_ONLY
-      const rowAnim: RowAnim | undefined =
-        phase === 'collapsing' ? 'collapse' : phase === 'expanding' ? 'expand' : undefined
-      // Desktop with Client: the drawn chevron square, a transparent Client over it takes the press.
-      const collapseControl =
-        'Client' in ui && !isClientFailed ? (
-          (() => {
-            const { Client } = ui
-            const collapseAlt = lang === 'it' ? 'Riduci' : 'Collapse'
-            return (
-              <Box key="collapse-box" position="relative">
-                <Svg source={withAnim(collapseSvg(), rowAnim)} width={CHEVRON} height={CHEVRON} alt={collapseAlt} />
-                <Box position="absolute" top={0} left={0} right={0} bottom={0}>
-                  <Client
-                    key="collapse"
-                    module="./collapsed-client.tsx"
-                    props={{ action: 'collapse', alt: collapseAlt }}
-                    width="100%"
-                    height="100%"
-                  />
-                </Box>
-              </Box>
-            )
-          })()
-        ) : (
-          collapseButton
-        )
+      const g = desktopRowGeometry(cols, agentsButton ? agentsLabel.length : 0)
       return (
         <Box flexDirection="column">
           <Box flexDirection="row" alignItems="center" justifyContent="space-between" width="100%" gap={1}>
             <Svg
               key="main"
-              source={mainRowSvg(m, mainW, Math.floor(at / 1000), rowAnim)}
+              source={mainRowSvg(m, g.mainW, Math.floor(at / 1000))}
               alt={alt}
-              width={mainW}
+              width={g.mainW}
               height={MAIN_H}
             />
             <Box key="zone" flexDirection="row" alignItems="center" gap={1} flexShrink={0}>
               {agentsButton}
-              <Svg key="sep" source={withAnim(separatorSvg(), rowAnim)} alt="" width={SEP_W} height={SEP_H} />
-              {hasRam ? (
-                <Svg
-                  key="ram"
-                  source={withAnim(ramCardSvg(ramInfo, ramW, MAIN_H, isRamPctOnly), rowAnim)}
-                  alt={ramAlt}
-                  width={ramW}
-                  height={MAIN_H}
-                />
-              ) : null}
-              {collapseControl}
+              <Svg key="sep" source={separatorSvg()} alt="" width={SEP_W} height={SEP_H} />
+              <Svg
+                key="ram"
+                source={ramCardSvg(ramInfo, g.ramW, MAIN_H, g.isRamPctOnly, ramErr)}
+                alt={ramAlt}
+                width={g.ramW}
+                height={MAIN_H}
+              />
             </Box>
           </Box>
           {shown.length > 0 || moreLine ? (
             <Box flexDirection="column">
               {shown.map(r => (
-                <Svg key={r.id} source={agentRowSvg(r, rowW)} alt={rowAlt(r)} width={rowW} height={AGENT_ROW_H} />
+                <Svg key={r.id} source={agentRowSvg(r, g.rowW)} alt={rowAlt(r)} width={g.rowW} height={AGENT_ROW_H} />
               ))}
               {moreLine ? <Text dimColor>{moreLine}</Text> : null}
             </Box>
@@ -773,13 +683,10 @@ export const register: Register = (on, options) => {
     // Terminal: the same structure in text.
     const tui = ui as TerminalUi
     const cols = Math.max(24, e.props.bodyColumns || 80)
-    // "RAM ▕█████▏ 9.8/16 GB", or "RAM –".
+    // "RAM ▕█████▏ 9.8/16 GB", or "RAM –" / "RAM ?".
     const ramCols = ramInfo ? 'RAM ▕█████▏ '.length + fmtRamPair(ramInfo).length : 'RAM –'.length
-    const mainCols = Math.max(
-      12,
-      cols - (agentsButton ? agentsLabel.length + 1 : 0) - 2 - (COLLAPSE_LABEL.length + 1) - (ramCols + 1),
-    )
-    // [main] [agents?] │ [RAM] [‹], as on the desktop.
+    const mainCols = Math.max(12, cols - (agentsButton ? agentsLabel.length + 1 : 0) - 2 - (ramCols + 1))
+    // [main] [agents?] │ [RAM], as on the desktop.
     return (
       <Box flexDirection="column">
         <Box flexDirection="row" gap={1}>
@@ -790,8 +697,7 @@ export const register: Register = (on, options) => {
           <Text key="sep" dimColor>
             │
           </Text>
-          {ramCardTerminal(tui, ramInfo)}
-          {collapseButton}
+          {ramCardTerminal(tui, ramInfo, ramErr)}
         </Box>
         {shown.map(r => (
           <Box key={r.id}>{agentRowTerminal(tui, r, cols)}</Box>
@@ -800,22 +706,4 @@ export const register: Register = (on, options) => {
       </Box>
     )
   })
-
-  // A press on the desktop's drawn controls: the collapsed square's `Client`
-  // posts `{ action: 'expand' }`, the collapse control's `{ action: 'collapse' }`.
-  on('ui.message', async ($, e, next) => {
-    const data = e.data as { action?: unknown } | null
-    const action = data && typeof data === 'object' ? data.action : undefined
-    if (e.element === 'collapsed' || e.element === 'collapse') {
-      if (action === 'expand') await requestExpand($)
-      else if (action === 'collapse') await requestCollapse($)
-    }
-    return next(e)
-  }).catch(($, e, next) => next(e))
-
-  // A `Client` of the band failed on a surface: fall back to Buttons for this load.
-  on('ui.fault', async ($, e, next) => {
-    if (e.element === 'collapsed' || e.element === 'collapse') isClientFailed = true
-    return next(e)
-  }).catch(($, e, next) => next(e))
 }

@@ -3,7 +3,11 @@
 // hands the text here. No `$` here.
 
 export type RamInfo = { usedBytes: number; totalBytes: number }
-export type RamProbe = { kind: 'run'; argv: string[] } | { kind: 'file'; path: string }
+/** Which parser reads a probe's output. */
+export type RamFormat = 'win32' | 'wmic' | 'darwin' | 'linux'
+export type RamProbe =
+  | { kind: 'run'; argv: string[]; format: RamFormat }
+  | { kind: 'file'; path: string; format: RamFormat }
 
 /** How often register.tsx re-reads the RAM figures. */
 export const RAM_POLL_MS = 5000
@@ -11,17 +15,32 @@ export const RAM_POLL_MS = 5000
 const WIN_SCRIPT =
   '$o=Get-CimInstance Win32_OperatingSystem; "$($o.TotalVisibleMemorySize) $($o.FreePhysicalMemory)"'
 
-/** What to run or read on `platform` ('win32' | 'darwin' | 'linux'); null elsewhere. */
-export function ramProbe(platform: string): RamProbe | null {
+/**
+ * What to run or read on `platform` ('win32' | 'darwin' | 'linux'), in the
+ * order to try them: register.tsx moves on to the next when one rejects,
+ * exits non-zero or does not parse. Empty elsewhere.
+ */
+export function ramProbes(platform: string): RamProbe[] {
   switch (platform) {
     case 'win32':
-      return { kind: 'run', argv: ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', WIN_SCRIPT] }
+      return [
+        {
+          kind: 'run',
+          argv: ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', WIN_SCRIPT],
+          format: 'win32',
+        },
+        {
+          kind: 'run',
+          argv: ['cmd.exe', '/c', 'wmic OS get FreePhysicalMemory,TotalVisibleMemorySize /value'],
+          format: 'wmic',
+        },
+      ]
     case 'darwin':
-      return { kind: 'run', argv: ['sh', '-c', 'sysctl -n hw.memsize; vm_stat'] }
+      return [{ kind: 'run', argv: ['sh', '-c', 'sysctl -n hw.memsize; vm_stat'], format: 'darwin' }]
     case 'linux':
-      return { kind: 'file', path: '/proc/meminfo' }
+      return [{ kind: 'file', path: '/proc/meminfo', format: 'linux' }]
     default:
-      return null
+      return []
   }
 }
 
@@ -47,6 +66,21 @@ function parseWin(out: string): RamInfo | null {
     return info(total, total - free)
   }
   return null
+}
+
+function parseWmic(out: string): RamInfo | null {
+  // "FreePhysicalMemory=6291456" and "TotalVisibleMemorySize=16777216" (KB), any order.
+  const kb = (key: string): number | null => {
+    for (const l of lines(out)) {
+      const m = /^([A-Za-z]+)\s*=\s*(\d+)$/.exec(l)
+      if (m && m[1]?.toLowerCase() === key.toLowerCase()) return Number(m[2]) * 1024
+    }
+    return null
+  }
+  const total = kb('TotalVisibleMemorySize')
+  const free = kb('FreePhysicalMemory')
+  if (total === null || free === null || free > total) return null
+  return info(total, total - free)
 }
 
 function parseMac(out: string): RamInfo | null {
@@ -80,12 +114,17 @@ function parseLinux(out: string): RamInfo | null {
   return info(total, total - avail)
 }
 
-/** The probe's output (stdout, or the file's text) as used/total bytes; null when unreadable. */
-export function parseRam(platform: string, output: string): RamInfo | null {
+/**
+ * The probe's output (stdout, or the file's text) as used/total bytes; null
+ * when unreadable. `format` is the probe's (a platform name, or 'wmic').
+ */
+export function parseRam(format: string, output: string): RamInfo | null {
   if (typeof output !== 'string' || !output.trim()) return null
-  switch (platform) {
+  switch (format) {
     case 'win32':
       return parseWin(output)
+    case 'wmic':
+      return parseWmic(output)
     case 'darwin':
       return parseMac(output)
     case 'linux':
