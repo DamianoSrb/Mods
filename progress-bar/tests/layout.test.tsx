@@ -23,11 +23,13 @@ const RAM_W = 120
 const rowWOf = (cols: number): number => Math.max(180, Math.min(1600, cols * 8 - 96 - 24))
 const agentsPxOf = (label: string): number => Math.ceil(label.length * 7.5) + 24
 
-function world(on: On): MockClock {
+// With `isMulti`, each spawn gets its own agent id (one row per agent).
+function world(on: On, isMulti = false): MockClock {
   const clock = mock.clock(on, { now: 1_000 })
+  let n = 0
   on('session.start', async (_, e) => ({ cwd: e.cwd }))
   on('tool.register', async (_, e) => ({ value: { tool: `mcp__progress-bar__${e.name}` } }))
-  on('agent.spawn', async () => ({ model: 'claude-opus-5-5', agentId: 'agent-1' }))
+  on('agent.spawn', async () => ({ model: 'claude-opus-5-5', agentId: isMulti ? `agent-${++n}` : 'agent-1' }))
   return clock
 }
 
@@ -65,10 +67,15 @@ type Node = {
 const kids = (n: unknown): Node[] => ((n as Node)?.children ?? []).filter((c): c is Node => !!c && typeof c === 'object')
 const firstRow = (tree: unknown): Node[] => kids(kids(tree)[0])
 const keyOf = (k: Node | undefined): string => k?.props?.key ?? k?.type ?? '?'
-// The desktop row flattened: the main bar, then the right zone's parts in order.
+// The desktop band: [left column] [divider] [right column].
+const desktopCols = (tree: unknown): { left: Node[]; sep: Node | undefined; right: Node[] } => {
+  const [left, sep, right] = kids(tree)
+  return { left: kids(left), sep, right: kids(right) }
+}
+// The desktop band flattened: the top row (main bar, agents?), the divider, then the RAM column.
 const desktopParts = (tree: unknown): Node[] => {
-  const [main, zone] = firstRow(tree)
-  return [...(main ? [main] : []), ...kids(zone)]
+  const { left, sep, right } = desktopCols(tree)
+  return [...kids(left[0]), ...(sep ? [sep] : []), ...right]
 }
 const widthOf = (n: Node | undefined): number => Number(n?.props?.width ?? 0)
 // What a row part is: by key where the drawing keeps one, else by what it draws.
@@ -144,8 +151,8 @@ test('desktop row without agents: [main] [sep] [RAM 120px], main takes the rest'
   await start($)
   const ui = await mount($, 'desktop')
   const tree = await ui.drawn()
-  const outer = kids(tree)[0]
-  expect((outer?.props as { justifyContent?: string })?.justifyContent).toBe('flex-start')
+  expect(((tree as Node)?.props as { justifyContent?: string; alignItems?: string })?.justifyContent).toBe('flex-start')
+  expect(((tree as Node)?.props as { alignItems?: string })?.alignItems).toBe('flex-start')
   const parts = desktopParts(tree)
   expect(parts.map(roleOf)).toEqual(['main', 'sep', 'ram'])
   const rowW = rowWOf(100)
@@ -293,36 +300,93 @@ test('linux: /proc/meminfo through fs.read; a later parse failure keeps the valu
   expect(String(ram?.props?.alt)).toContain('parse failed (linux)')
 })
 
-test('desktop divider: the top-row separator x carries on down through the agent rows', IT, async ($, on) => {
+for (const count of [1, 3]) {
+  test(`desktop band with ${count} agent row(s): [left column] [divider 1×(30+18n)] [RAM 120px]`, IT, async ($, on) => {
+    world(on, true)
+    await start($)
+    const ui = await mount($, 'desktop', { bodyColumns: 150 })
+    for (let i = 0; i < count; i++)
+      await $.agent.spawn({
+        prompt: 'Look around.',
+        description: `Scout ${i}`,
+        subagentType: 'savvy-flow:savvy-light',
+        tool_use_id: `toolu_${i + 1}`,
+        provider: { plugin: 'engine', tier: 'core' },
+        parentModel: 'claude-opus-5-5',
+        background: true,
+        fork: false,
+      })
+    await ui.redraw()
+    await ui.press({ key: 'agents' })
+    const tree = await ui.drawn()
+    const { left, sep, right } = desktopCols(tree)
+    expect(kids(tree).length).toBe(3)
+    // Left column: the top row [main, agents], then the agent rows.
+    expect(kids(left[0]).map(roleOf)).toEqual(['main', 'agents'])
+    const rows = left.slice(1)
+    expect(rows.length).toBe(count)
+    // The divider: one 1px Svg spanning the main bar and every agent row.
+    expect(sep?.type).toBe('Svg')
+    expect(widthOf(sep)).toBe(1)
+    expect(Number(sep?.props?.height)).toBe(30 + 18 * count)
+    const sepSrc = String(sep?.props?.source)
+    expect(sepSrc).toContain(`height="${30 + 18 * count}"`)
+    expect(sepSrc).toContain('#e4e4e1')
+    expect(sepSrc).toContain('#333331')
+    // The RAM column: the 120px card alone, last.
+    expect(right.map(roleOf)).toEqual(['ram'])
+    expect(widthOf(right[0])).toBe(RAM_W)
+    expect(Number(right[0]?.props?.height)).toBe(30)
+    // Agent rows at the left column's width; no divider of their own; right text ends 4px short.
+    const leftW = rowWOf(150) - RAM_W - 1 - 2 * GAP_PX
+    for (const n of rows) {
+      expect(widthOf(n)).toBe(leftW)
+      const r = String(n.props?.source)
+      expect(r).toContain(`width="${leftW}" height="18"`)
+      expect(r).not.toContain('pba-sep')
+      const m = r.match(/class="pba-s" x="(\d+(?:\.\d+)?)"[^>]*text-anchor="end"/)
+      expect(Number(m?.[1])).toBe(leftW - 4)
+      for (const b of r.matchAll(/class="pba-k" x="(\d+(?:\.\d+)?)" y="[^"]*" width="(\d+(?:\.\d+)?)"/g))
+        expect(Number(b[1]) + Number(b[2])).toBeLessThan(leftW - 4)
+    }
+    // The main bar: the left column less the agents estimate and its gap.
+    expect(widthOf(kids(left[0])[0])).toBe(leftW - agentsPxOf(String(kids(left[0])[1]?.props?.label)) - GAP_PX)
+  })
+}
+
+test('desktop band, agents closed: the divider is the main bar tall', IT, async ($, on) => {
   world(on)
   await start($)
   const ui = await mount($, 'desktop', { bodyColumns: 150 })
   await spawn($)
   await ui.redraw()
+  const { left, sep } = desktopCols(await ui.drawn())
+  expect(left.length).toBe(1)
+  expect(Number(sep?.props?.height)).toBe(30)
+})
+
+test('desktop band cut by maxRows: the divider includes the +N line', IT, async ($, on) => {
+  world(on, true)
+  await start($)
+  const ui = await mount($, 'desktop', { bodyColumns: 150, maxRows: 3 })
+  for (let i = 0; i < 4; i++)
+    await $.agent.spawn({
+      prompt: 'Look around.',
+      description: `Scout ${i}`,
+      subagentType: 'savvy-flow:savvy-light',
+      tool_use_id: `toolu_${i + 1}`,
+      provider: { plugin: 'engine', tier: 'core' },
+      parentModel: 'claude-opus-5-5',
+      background: true,
+      fork: false,
+    })
+  await ui.redraw()
   await ui.press({ key: 'agents' })
   const tree = await ui.drawn()
-  const parts = desktopParts(tree)
-  expect(parts.map(roleOf)).toEqual(['main', 'agents', 'sep', 'ram'])
-  const sep = parts[2]
-  expect(Number(sep?.props?.height)).toBe(30)
-  expect(String(sep?.props?.source)).toContain('height="30"')
-  // The separator's x: main + gap + agents + gap (the RAM card follows after sep + gap).
-  const label = String(parts[1]?.props?.label)
-  const sepX = widthOf(parts[0]) + GAP_PX + agentsPxOf(label) + GAP_PX
-  expect(sepX + 1 + GAP_PX + RAM_W).toBe(rowWOf(150))
-  const rows = (JSON.stringify(tree).match(/"source":"<svg.*?<\/svg>/g) ?? [])
-    .map(s => s.replace(/\\"/g, '"'))
-    .filter(s => s.includes('pba-'))
-  expect(rows.length).toBe(1)
-  for (const r of rows) {
-    expect(r).toContain(`width="${rowWOf(150)}" height="18"`)
-    expect(r).toContain(`<rect class="pba-sep" x="${sepX}" y="0" width="1" height="18"/>`)
-    expect(r).toContain('#e4e4e1')
-    expect(r).toContain('#333331')
-    // The right text (anchored at its end) and the bar end before the divider.
-    const m = r.match(/class="pba-s" x="(\d+(?:\.\d+)?)"[^>]*text-anchor="end"/)
-    expect(Number(m?.[1])).toBe(sepX - 10)
-    for (const b of r.matchAll(/class="pba-k" x="(\d+(?:\.\d+)?)" y="[^"]*" width="(\d+(?:\.\d+)?)"/g))
-      expect(Number(b[1]) + Number(b[2])).toBeLessThan(sepX - 10)
-  }
+  const { left, sep } = desktopCols(tree)
+  // maxRows 3: main + 1 row + the "+N" line.
+  const svgRows = left.slice(1).filter(n => n.type === 'Svg')
+  expect(svgRows.length).toBe(1)
+  expect(JSON.stringify(left)).toContain('+3')
+  expect(Number(sep?.props?.height)).toBe(30 + 18 + 18)
 })

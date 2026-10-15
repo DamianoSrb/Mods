@@ -147,22 +147,25 @@ async function pollRam($: EngineInterface): Promise<void> {
   }
 }
 
-// The thin vertical line between the agents control and the RAM card, the
-// row's full height; the agent rows below carry it on at the same x.
+// The thin vertical line between the left column (main bar, agents control,
+// agent rows) and the RAM card: one Svg, from the band's top down through
+// every agent row, so its x is wherever the left column ends.
 const SEP_W = 1
-const SEP_H = MAIN_H
+// The "+N altri" text line under the agent rows, as tall as a row.
+const MORE_H = 18
 
-function separatorSvg(): string {
+function dividerSvg(height: number): string {
+  const h = Math.max(1, Math.round(height))
   return (
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${SEP_W}" height="${SEP_H}" viewBox="0 0 ${SEP_W} ${SEP_H}">` +
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${SEP_W}" height="${h}" viewBox="0 0 ${SEP_W} ${h}">` +
     '<style>.pbs-l{fill:#e4e4e1}@media (prefers-color-scheme: dark){.pbs-l{fill:#333331}}</style>' +
-    `<rect class="pbs-l" x="0" y="0" width="${SEP_W}" height="${SEP_H}"/>` +
+    `<rect class="pbs-l" x="0" y="0" width="${SEP_W}" height="${h}"/>` +
     '</svg>'
   )
 }
 
-// The desktop row: [main bar] [agents?] [sep] [RAM card], the RAM card flush
-// right at a fixed width. The desktop puts ~GAP_PX between siblings.
+// The desktop band: [left column: main bar + agents?, agent rows] [divider]
+// [RAM card], the RAM card at a fixed width. The desktop puts ~GAP_PX between siblings.
 const GAP_PX = 8
 // The row width is estimated from bodyColumns; ROW_SAFETY_PX more is held back
 // so an estimate a little wide never makes the row wrap.
@@ -174,22 +177,25 @@ const RAM_PCT_W = 72
 const MAIN_MIN = 60
 const RAM_MIN = 40
 
-type RowGeometry = { rowW: number; mainW: number; ramW: number; agentsPx: number; isRamPctOnly: boolean; sepX: number }
+type RowGeometry = { rowW: number; leftW: number; mainW: number; ramW: number; agentsPx: number; isRamPctOnly: boolean }
 
-/** Widths of the desktop row for `cols` body columns and an agents label of `agentsLen` characters (0: none). */
+/**
+ * Widths of the desktop band for `cols` body columns and an agents label of
+ * `agentsLen` characters (0: none). leftW is the left column (the agent rows'
+ * width); the agents estimate only sizes the main bar, never the divider's x.
+ */
 function desktopRowGeometry(cols: number, agentsLen: number): RowGeometry {
   const rowW = Math.max(180, Math.min(1600, cols * 8 - 96 - ROW_SAFETY_PX))
   const agentsPx = agentsLen > 0 ? Math.ceil(agentsLen * 7.5) + 24 : 0
   const isRamPctOnly = rowW < PCT_ONLY_BELOW
-  // Everything but the main bar: the main–zone gap, then agents + gap, sep + gap.
-  const fixed = GAP_PX + (agentsPx ? agentsPx + GAP_PX : 0) + SEP_W + GAP_PX
+  // Everything but the main bar: agents + gap in the left column, then gap, divider, gap.
+  const fixed = (agentsPx ? agentsPx + GAP_PX : 0) + GAP_PX + SEP_W + GAP_PX
   let ramW = isRamPctOnly ? RAM_PCT_W : RAM_W
   // Only on a very narrow row: the RAM card gives way (to RAM_MIN) before the main bar drops under MAIN_MIN.
   if (rowW - fixed - ramW < MAIN_MIN) ramW = Math.max(RAM_MIN, rowW - fixed - MAIN_MIN)
-  const mainW = Math.max(RAM_MIN, rowW - fixed - ramW)
-  // The separator's x in the row: main, gap, then agents + gap.
-  const sepX = mainW + GAP_PX + (agentsPx ? agentsPx + GAP_PX : 0)
-  return { rowW, mainW, ramW, agentsPx, isRamPctOnly, sepX }
+  const leftW = rowW - ramW - SEP_W - 2 * GAP_PX
+  const mainW = Math.max(RAM_MIN, leftW - (agentsPx ? agentsPx + GAP_PX : 0))
+  return { rowW, leftW, mainW, ramW, agentsPx, isRamPctOnly }
 }
 
 /** The agents control's label: `▾3 · 45k`, `▴` when open, a `●` first while any runs. */
@@ -652,41 +658,40 @@ export const register: Register = (on, options) => {
       const { Svg } = ui
       const cols = e.props.bodyColumns || 100
       const g = desktopRowGeometry(cols, agentsButton ? agentsLabel.length : 0)
+      // The divider spans the left column exactly: the rows' heights are fixed.
+      const dividerH = MAIN_H + shown.length * AGENT_ROW_H + (moreLine ? MORE_H : 0)
       return (
-        <Box flexDirection="column" gap={0}>
-          {/* Packed from the left, never spread: the divider's x must match the sepX the agent rows draw at. */}
-          <Box flexDirection="row" alignItems="center" justifyContent="flex-start" width="100%" gap={1}>
-            <Svg
-              key="main"
-              source={mainRowSvg(m, g.mainW, Math.floor(at / 1000), hasBranch)}
-              alt={alt}
-              width={g.mainW}
-              height={MAIN_H}
-            />
-            <Box key="zone" flexDirection="row" alignItems="center" gap={1} flexShrink={0}>
-              {agentsButton}
-              <Svg key="sep" source={separatorSvg()} alt="" width={SEP_W} height={SEP_H} />
+        <Box flexDirection="row" alignItems="flex-start" justifyContent="flex-start" width="100%" gap={1}>
+          <Box key="left" flexDirection="column" gap={0} flexShrink={0}>
+            <Box key="top" flexDirection="row" alignItems="center" gap={1}>
               <Svg
-                key="ram"
-                source={ramCardSvg(ramInfo, g.ramW, MAIN_H, g.isRamPctOnly, ramErr)}
-                alt={ramAlt}
-                width={g.ramW}
+                key="main"
+                source={mainRowSvg(m, g.mainW, Math.floor(at / 1000), hasBranch)}
+                alt={alt}
+                width={g.mainW}
                 height={MAIN_H}
               />
+              {agentsButton}
             </Box>
+            {shown.map((r, i) => (
+              <Svg key={r.id} source={agentRowSvg(r, g.leftW, branchOf(i))} alt={rowAlt(r)} width={g.leftW} height={AGENT_ROW_H} />
+            ))}
+            {moreLine ? (
+              <Box paddingLeft={2}>
+                <Text dimColor>{moreLine}</Text>
+              </Box>
+            ) : null}
           </Box>
-          {shown.length > 0 || moreLine ? (
-            <Box flexDirection="column" gap={0}>
-              {shown.map((r, i) => (
-                <Svg key={r.id} source={agentRowSvg(r, g.rowW, branchOf(i), g.sepX)} alt={rowAlt(r)} width={g.rowW} height={AGENT_ROW_H} />
-              ))}
-              {moreLine ? (
-                <Box paddingLeft={2}>
-                  <Text dimColor>{moreLine}</Text>
-                </Box>
-              ) : null}
-            </Box>
-          ) : null}
+          <Svg key="sep" source={dividerSvg(dividerH)} alt="" width={SEP_W} height={dividerH} />
+          <Box key="right" flexDirection="column" alignItems="flex-start" flexShrink={0}>
+            <Svg
+              key="ram"
+              source={ramCardSvg(ramInfo, g.ramW, MAIN_H, g.isRamPctOnly, ramErr)}
+              alt={ramAlt}
+              width={g.ramW}
+              height={MAIN_H}
+            />
+          </Box>
         </Box>
       )
     }
