@@ -19,10 +19,11 @@ const CELL = 3
 const ROWS = Math.floor(BAR_H / CELL)
 const CELL_Y0 = (BAR_H - ROWS * CELL) / 2 + 0.5
 const TITLE_X = 10
-const TITLE_SIZE = 11
-const PILL_SIZE = 10
-const RIGHT_SIZE = 10
-const RIGHT_SLOT = 44
+// Larger than the agent rows' 12/11px, so the main bar reads first.
+const TITLE_SIZE = 15
+const PILL_SIZE = 12
+const RIGHT_SIZE = 13
+const RIGHT_SLOT = 52
 const BAR_GAP_L = 8
 const BAR_GAP_R = 6
 const BAR_MIN = 24
@@ -305,7 +306,7 @@ export function mainRowSvg(m: MainModel, width: number, seed = 0): string {
 <style>${savvyClasses('pbm')}${css}${REDUCED}</style>
 <defs><clipPath id="pbm-clip"><rect x="0" y="0" width="${BAR_W}" height="${BAR_H}" rx="${BAR_R}"/></clipPath>${defs}</defs>
 <circle cx="5" cy="${H / 2}" r="3" fill="${dotColor(m)}"/>
-<text class="pbm-t" x="${TITLE_X}" y="${textY}" font-family="${FONT}" font-size="${TITLE_SIZE}" font-weight="500">${xml(title)}</text>
+<text class="pbm-t" x="${TITLE_X}" y="${textY}" font-family="${FONT}" font-size="${TITLE_SIZE}" font-weight="600">${xml(title)}</text>
 <g transform="translate(${BAR_X},${y0})">
 <rect class="pbm-k" width="${BAR_W}" height="${BAR_H}" rx="${BAR_R}"/>
 <g clip-path="url(#pbm-clip)">${body}</g>

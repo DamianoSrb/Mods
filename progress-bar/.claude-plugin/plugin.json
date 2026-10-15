@@ -1,6 +1,6 @@
 {
   "name": "progress-bar",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Always-visible animated progress band above the prompt: flow progress, turn activity, RAM in use and per-agent progress with tokens.",
   "author": { "name": "Damiano Sommavilla" },
   "types": "./types/index.d.ts",
