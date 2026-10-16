@@ -3,17 +3,22 @@
 // bar, a green check / red cross marks the end, the context fallback is grey.
 import type { AgentRowModel } from './model'
 import { BRANCH_COLOR, BRANCH_OPACITY, BRANCH_W, DOT_X } from './main-row'
-import { FONT, colorOf, fitText, savvyClasses, textWidth, xml, type TerminalUi } from './shared'
+import { FONT, colorOf, fitText, savvyClasses, textWidth, wholePercent, xml, type TerminalUi } from './shared'
 
 /** Where a row hangs on the tree: 'mid' (├─, the trunk goes on) or 'last' (└─). */
 export type Branch = 'mid' | 'last'
 
 export const AGENT_ROW_H = 18
 
-const ROW_CSS =
+// The pulse only where a running dot uses it: a finished row carries no
+// animation, so a surface treats it as a still picture.
+const rowCss = (isLive: boolean): string =>
   `<style>${savvyClasses('pba', 'pane')}` +
-  '.pba-live{animation:pba-pulse 1s ease-in-out infinite}@keyframes pba-pulse{50%{opacity:.3}}' +
-  '@media (prefers-reduced-motion: reduce){.pba-live{animation:none}}</style>'
+  (isLive
+    ? '.pba-live{animation:pba-pulse 1s ease-in-out infinite}@keyframes pba-pulse{50%{opacity:.3}}' +
+      '@media (prefers-reduced-motion: reduce){.pba-live{animation:none}}'
+    : '') +
+  '</style>'
 
 const OK = '#3B9C5F'
 const KO = '#D0453F'
@@ -69,6 +74,8 @@ const branchSvg = (branch: Branch, status: AgentRowModel['status']): string => {
 /**
  * One agent row, `width` × AGENT_ROW_H; the right text ends 4px short of the
  * row's right edge. On the desktop the rows sit in the column left of the divider.
+ * A pure function of the row model: a running row's time comes in whole
+ * minutes there (buildAgentRows' timeStyle), so a redraw keeps the same source.
  */
 export function agentRowSvg(r: AgentRowModel, width: number, branch: Branch = 'last'): string {
   const W = Math.max(INDENT + 40, Math.round(width))
@@ -81,7 +88,8 @@ export function agentRowSvg(r: AgentRowModel, width: number, branch: Branch = 'l
   const titleSlot = Math.max(0, Math.min(Math.round((rightX + 2) * 0.35), room - BAR_MIN))
   const barX = TITLE_X + titleSlot + GAP
   const barW = Math.max(0, rightX - rightW - GAP - barX)
-  const fillW = Math.round(barW * clamp01(r.progress))
+  // Whole percent, as `ctx N%` reads: a context creeping by a few tokens moves nothing.
+  const fillW = Math.round(barW * wholePercent(r.progress))
   const barY = MID_Y - BAR_H / 2
   const title = titleSlot > 12 ? fitText(r.title, 12, titleSlot) : ''
   // Without reported steps the bar falls back to the context, drawn grey.
@@ -95,7 +103,7 @@ export function agentRowSvg(r: AgentRowModel, width: number, branch: Branch = 'l
       : '') +
     (barW > 0 ? `<rect class="pba-k" x="${barX}" y="${barY}" width="${barW}" height="${BAR_H}" rx="2"/>${fill}` : '') +
     `<text class="pba-s" x="${rightX}" y="${TEXT_Y}" text-anchor="end" font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums" style="font-variant-numeric:tabular-nums">${xml(right)}</text>`
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${AGENT_ROW_H}" viewBox="0 0 ${W} ${AGENT_ROW_H}">${ROW_CSS}${body}</svg>`
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${AGENT_ROW_H}" viewBox="0 0 ${W} ${AGENT_ROW_H}">${rowCss(r.status === 'running')}${body}</svg>`
 }
 
 const GLYPH: Record<AgentRowModel['status'], string> = { running: '●', done: '✓', failed: '✗' }

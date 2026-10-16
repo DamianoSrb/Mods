@@ -5,12 +5,17 @@ import {
   agentsSummary,
   buildAgentRows,
   buildMainModel,
+  isPlanComplete,
+  normTitle,
+  planAfterCall,
   type AgentRowModel,
   type AgentRun,
   type Flow,
+  type Plan,
+  type PlanCall,
 } from './model'
-import { STRINGS, fmtTokens, pickLang, type Lang, type TerminalUi } from './shared'
-import { MAIN_H, mainRowSvg, mainRowTerminal } from './main-row'
+import { STRINGS, fmtTokens, pickLang, type Lang, type TerminalUi, type TimeStyle } from './shared'
+import { MAIN_H, mainRowSvg, mainRowTerminal, turnSeed } from './main-row'
 import { AGENT_ROW_H, agentRowSvg, agentRowTerminal, type Branch } from './agent-rows'
 import { RAM_GRACE_MS, RAM_POLL_MS, fmtRamPair, parseRam, ramProbes, type RamInfo, type RamProbe } from './ram'
 import { ramAltText, ramCardTerminal, rightZoneSvg } from './ram-card'
@@ -18,6 +23,8 @@ import { ramAltText, ramCardTerminal, rightZoneSvg } from './ram-card'
 // This mod's own values; it tracks everything itself.
 const flow = atom({ plugin: 'progress-bar', key: 'flow' } as const, null as Flow | null)
 const agents = atom({ plugin: 'progress-bar', key: 'agents' } as const, [] as AgentRun[])
+// The main loop's task list (update_plan / TodoWrite), for the working estimate.
+const plan = atom({ plugin: 'progress-bar', key: 'plan' } as const, null as Plan | null)
 const startedAt = atom({ plugin: 'progress-bar', key: 'startedAt' } as const, null)
 const endedAt = atom({ plugin: 'progress-bar', key: 'endedAt' } as const, null)
 const tools = atom({ plugin: 'progress-bar', key: 'tools' } as const, 0)
@@ -224,6 +231,10 @@ const STEP_TOOL = 'mcp__progress-bar__step'
 // savvy-progress is installed, and the hooks must type-check either way.
 const COMPAT_TOOL = /^mcp__savvy-progress__progress$/
 const COMPAT_STEP_TOOL = /^mcp__savvy-progress__step$/
+// The main loop's task list: the desktop app's update_plan (by pattern, for the same reason) and the CLI's TodoWrite.
+// Literal here, not imported: the validator reads each hook's matcher from this file.
+const PLAN_TOOL = /^mcp__ccd_turn__update_plan$/
+const TODO_TOOL = 'TodoWrite'
 
 const errorText = (err: unknown): string => {
   const text = err instanceof Error ? err.message : String(err ?? '')
@@ -353,8 +364,6 @@ const tokensOf = (u: Usage): number =>
 
 const windowOf = (model: string): number => (/haiku/i.test(model) ? 200_000 : 1_000_000)
 
-const norm = (s: string): string => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim()
-
 // ---------------------------------------------------------------------------
 // Updates shared by this mod's own tools and the observed savvy-progress ones.
 
@@ -366,6 +375,17 @@ async function applyProgress($: EngineInterface, input: ProgressInput): Promise<
   }
   const next = await update($, flow, p => merge(p ?? null, input))
   return next ?? blank()
+}
+
+/** A main-loop task list call (update_plan / TodoWrite) folded into `plan`; a subagent's is ignored. */
+async function observePlan($: EngineInterface, call: PlanCall): Promise<void> {
+  if (call.agentId) return
+  const at = await $.clock.now()
+  // Folded inside the update, so two calls in a row never lose one another.
+  await update($, plan, p => {
+    const next = planAfterCall(p ?? null, call, at)
+    return next === undefined ? (p ?? null) : next
+  })
 }
 
 async function applyStep($: EngineInterface, agentId: string, input: StepInput): Promise<void> {
@@ -490,6 +510,18 @@ export const register: Register = (on, options) => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
+  // The main loop's task list, for the working estimate: observed only, never
+  // answered. Each always continues with `e` unchanged, its `.catch` too.
+  on('tool.call', { tool: PLAN_TOOL }, async ($, e, next) => {
+    await observePlan($, e as unknown as PlanCall)
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('tool.call', { tool: TODO_TOOL }, async ($, e, next) => {
+    await observePlan($, e as unknown as PlanCall)
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   // Worker launches move the faint layer even if the orchestrator forgets to report.
   on('tool.call', { tool: 'Agent' }, async ($, e, next) => {
     const type = String(e.subagent_type ?? '')
@@ -514,7 +546,7 @@ export const register: Register = (on, options) => {
     const at = await $.clock.now()
     await update($, agents, prev => {
       const list = Array.isArray(prev) ? prev : []
-      const round = 1 + list.filter(a => e.description && norm(a.description) === norm(e.description)).length
+      const round = 1 + list.filter(a => e.description && normTitle(a.description) === normTitle(e.description)).length
       const run: AgentRun = {
         id: started.agentId ?? e.tool_use_id,
         agentId: started.agentId,
@@ -581,6 +613,9 @@ export const register: Register = (on, options) => {
       await update($, endedAt, () => null)
       await update($, tools, () => 0)
       await update($, now, () => at)
+      // A completed task list ends with its turn; one left open carries on until replaced.
+      const p = (await read($, plan)) ?? null
+      if (p && isPlanComplete(p)) await update($, plan, () => null)
     }
     return next(e)
   }).catch(($, e, next) => next(e))
@@ -637,8 +672,29 @@ export const register: Register = (on, options) => {
     const toolCount = await read($, tools)
     const expanded = await read($, isExpanded)
     const at = Math.max(await read($, now), start ?? 0)
+    const taskList = (await read($, plan)) ?? null
 
-    const m = buildMainModel({ flow: f, isWorking: e.props.isWorking, startedAt: start, endedAt: end, tools: toolCount, now: at }, s)
+    // Pictures (every surface but the terminal) are redrawn about once a second
+    // while something runs, and a surface loads each new source as a new image,
+    // showing the alt until it is drawn (VS Code gives it 1 s). So a time drawn
+    // inside an Svg reads in whole minutes, and its alt with it; the terminal's
+    // text keeps m:ss.
+    const timeStyle: TimeStyle = e.surface !== 'terminal' && 'Svg' in ui ? 'minutes' : 'clock'
+
+    const m = buildMainModel(
+      {
+        flow: f,
+        isWorking: e.props.isWorking,
+        startedAt: start,
+        endedAt: end,
+        tools: toolCount,
+        now: at,
+        agents: list,
+        plan: taskList,
+        timeStyle,
+      },
+      s,
+    )
     const alt = [m.title, m.pill, m.right].filter(Boolean).join(' · ')
 
     const ramErr = (await read($, ramError)) ?? null
@@ -646,7 +702,7 @@ export const register: Register = (on, options) => {
     const ramInfo = ramErr ? null : ((await read($, ram)) ?? null)
 
     const rowsAt = Math.max(at, ...list.map(a => a.startedAt))
-    const rows = expanded ? buildAgentRows(list, rowsAt) : []
+    const rows = expanded ? buildAgentRows(list, rowsAt, timeStyle) : []
 
     // The agents toggle, compact: "▾3 · 45k", "●▾3 · 45k" while any runs.
     const agentsLabel = agentsLabelOf(agentsSummary(list), expanded === true)
@@ -673,6 +729,10 @@ export const register: Register = (on, options) => {
       const g = desktopRowGeometry(cols, agentsButton ? agentsLabel.length : 0)
       // The right zone (and its divider) spans the left column exactly: the rows' heights are fixed.
       const totalH = MAIN_H + shown.length * AGENT_ROW_H + (moreLine ? MORE_H : 0)
+      // Every source below is a pure function of what it shows (seed from the
+      // turn, never the clock; whole percents; whole minutes), so a tick that
+      // changes nothing visible hands back the same bytes and no image reloads.
+      // Each Svg keeps its key and its place: VS Code matches them by position.
       return (
         <Box flexDirection="row" alignItems="flex-start" justifyContent="flex-start" width="100%" gap={1}>
           {/* A percentage, not g.leftW: a Box's numeric width is not pixels, so 80% of the real row it is. */}
@@ -680,7 +740,7 @@ export const register: Register = (on, options) => {
             <Box key="top" flexDirection="row" alignItems="center" gap={1}>
               <Svg
                 key="main"
-                source={mainRowSvg(m, g.mainW, Math.floor(at / 1000), hasBranch)}
+                source={mainRowSvg(m, g.mainW, turnSeed(start, m), hasBranch)}
                 alt={alt}
                 width={g.mainW}
                 height={MAIN_H}

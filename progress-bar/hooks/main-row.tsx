@@ -2,14 +2,36 @@
 // savvy-progress's look (dot, title, rounded dithered track, pill at the fill
 // head, muted right text), made livelier: the fill's violet → blue → teal
 // gradient flows through the dithered cells, white shimmers and sparks sweep
-// over it, and "working" sweeps a violet → pink → amber dithered segment.
-// Every redraw (about once a second) gets a new seed, so twinkle phases,
-// dither pattern, shimmer and sparks vary while every animation period
-// divides 1s (the redraw never shows a jump). The title and the right text
-// sit in fixed slots, so the bar width depends only on the row width.
+// over it, comets run through it and a cap pulses at its head; "working"
+// fills the whole track with a flowing violet → pink → amber dithered field
+// crossed by comets (or, with an estimated ratio, a dense fill with the same
+// shimmer, comet, cap and sparks).
+// The source is a pure function of what the row shows: the seed (twinkle
+// phases, dither pattern, shimmer, comets, sparks) comes from the turn, the
+// mode and the title (turnSeed), never from the clock, and the fill is drawn
+// at whole percent. The band redraws about once a second while something
+// runs, and a remote surface (the desktop, VS Code) loads a new picture for
+// every new source, showing the alt meanwhile: a redraw that changes nothing
+// visible must hand back the same bytes. The CSS animations run on their own
+// inside the picture. The title and the right text sit in fixed slots, so the
+// bar width depends only on the row width.
 // No `$` here.
 import type { MainModel } from './model'
-import { ACCENT, DONE, FONT, IDLE, fitText, mulberry32, noise, savvyClasses, strHash, textWidth, xml, type TerminalUi } from './shared'
+import {
+  ACCENT,
+  DONE,
+  FONT,
+  IDLE,
+  fitText,
+  mulberry32,
+  noise,
+  savvyClasses,
+  strHash,
+  textWidth,
+  wholePercent,
+  xml,
+  type TerminalUi,
+} from './shared'
 
 export const MAIN_H = 30
 /** The main dot's center x: the agent rows' tree trunk runs down from it. */
@@ -54,6 +76,13 @@ const WORK_STOPS: [number, string][] = [
   [0.55, '#E36FB0'],
   [1, '#F5B731'],
 ]
+/** The working colors, cyclic, for the flowing field. */
+const WORK_CYCLE: [number, string][] = [
+  [0, ACCENT],
+  [0.33, '#E36FB0'],
+  [0.66, '#F5B731'],
+  [1, ACCENT],
+]
 
 const clamp = (n: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, n))
 
@@ -87,14 +116,15 @@ const gradient = (id: string, stops: [number, string][], x2: number, repeat = fa
 
 type Rand = () => number
 
-/** Per-redraw random look: twinkle groups, dither offset. */
+/** The seeded random look: twinkle groups, dither offset. */
 type Look = { groups: number; ox: number; oy: number }
 
 /**
  * Dithered cells over columns [from, to), each kept when noise < density(c);
- * the noise is offset by the redraw's seed, so the pattern changes each
- * second. One `<path>` per twinkle group, cells written with relative moves
- * (`m3 0h2v2h-2z`) so the SVG stays small even on a wide bar.
+ * the noise is offset by the seed, so the pattern differs from turn to turn
+ * and mode to mode, and holds within one. One `<path>` per twinkle group,
+ * cells written with relative moves (`m3 0h2v2h-2z`) so the SVG stays small
+ * even on a wide bar.
  */
 const cells = (from: number, to: number, cls: string, density: (c: number) => number, look: Look, size = 2, attrs = ''): string => {
   const G = look.groups
@@ -134,8 +164,7 @@ const twinkleCss = (cls: string, look: Look, rnd: Rand, lo: number, hi: number):
 const ramp = (cols: number) => (c: number): number => 0.35 + 0.6 * Math.pow(c / Math.max(1, cols), 1.2)
 
 /** Bright 2×2 cells near `headX` (in [lo, headX]), fading in and out at random. */
-const sparks = (rnd: Rand, lo: number, headX: number, idx: { n: number }): { svg: string; css: string } => {
-  const count = 3 + Math.floor(rnd() * 4)
+const sparks = (rnd: Rand, lo: number, headX: number, idx: { n: number }, count = 3 + Math.floor(rnd() * 4)): { svg: string; css: string } => {
   let svg = ''
   let css = ''
   const cLo = Math.max(0, Math.floor(lo / CELL))
@@ -154,6 +183,62 @@ const sparks = (rnd: Rand, lo: number, headX: number, idx: { n: number }): { svg
 
 const SPARK_KF = '@keyframes pbm-spk{0%,100%{opacity:0}50%{opacity:1}}'
 
+/** Comet colors along its own length (bounding-box units): faint violet tail → bright white head. */
+const cometGrad = (id: string, mid: string, hot: string): string =>
+  `<linearGradient id="${id}"><stop offset="0" stop-color="${ACCENT}" stop-opacity=".2"/>` +
+  `<stop offset=".55" stop-color="${mid}" stop-opacity=".85"/><stop offset=".88" stop-color="${hot}"/>` +
+  '<stop offset="1" stop-color="#ffffff"/></linearGradient>'
+
+const PULSE_KF = '@keyframes pbm-pulse{0%,100%{opacity:.15}50%{opacity:.35}}'
+
+/**
+ * A comet: a dithered trail `L` px long, sparse at the tail and dense at the
+ * head, with a soft pulsing glow under the head. It crosses [0, spanW] in
+ * `per` s (left → right; mirrored with `reverse`). The static position (no
+ * animation, reduced motion) is a random point inside the span.
+ */
+const comet = (
+  i: number,
+  L: number,
+  spanW: number,
+  per: number,
+  rnd: Rand,
+  look: Look,
+  grad: string,
+  glow: string,
+  reverse = false,
+): { svg: string; css: string } => {
+  const cols = Math.max(3, Math.floor(L / CELL))
+  const w = cols * CELL
+  const base = Math.round(rnd() * Math.max(0, spanW - w))
+  const cl: Look = { groups: 1, ox: look.ox + 31 * (i + 1), oy: look.oy + 17 * (i + 1) }
+  const trail = cells(0, cols, 'pbm-q', c => {
+    const t = (c + 1) / cols
+    return t > 0.86 ? 0.97 : 0.06 + 0.85 * Math.pow(t, 1.6)
+  }, cl)
+  const gw = Math.round(w * 0.6)
+  const svg =
+    `<g transform="translate(${base},0)"><g class="pbm-mv${i} pbm-an">` +
+    `<rect class="pbm-gl${i} pbm-an" x="${Math.round(w * 0.45)}" width="${gw}" height="${BAR_H}" rx="${BAR_R}" fill="${glow}" opacity=".25"/>` +
+    `<g fill="url(#${grad})">${trail}</g></g></g>`
+  const css =
+    `.pbm-mv${i}{animation:pbm-mv${i}k ${per}s linear ${f2(-rnd() * per)}s infinite}` +
+    `@keyframes pbm-mv${i}k{from{transform:translateX(${-w - base}px)}to{transform:translateX(${spanW - base}px)}}` +
+    `.pbm-gl${i}{animation:pbm-pulse .5s ease-in-out ${f2(-rnd() * 0.5)}s infinite}`
+  return { svg: reverse ? `<g transform="translate(${spanW},0) scale(-1,1)">${svg}</g>` : svg, css }
+}
+
+/** A bright pulsing cap at the fill head `x`: a 3px core in a soft 10px glow. */
+const cap = (x: number): string =>
+  `<g class="pbm-cap pbm-an"><rect x="${f2(x - 5)}" width="10" height="${BAR_H}" rx="5" fill="#ffffff" fill-opacity=".3"/>` +
+  `<rect x="${f2(x - 1.5)}" y="2" width="3" height="${BAR_H - 4}" rx="1.5" fill="#ffffff"/></g>`
+
+const CAP_CSS = '.pbm-cap{animation:pbm-capk .5s ease-in-out infinite}@keyframes pbm-capk{0%,100%{opacity:.5}50%{opacity:1}}'
+
+const SHINE =
+  '<linearGradient id="pbm-shine" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#ffffff" stop-opacity="0"/>' +
+  '<stop offset="0.5" stop-color="#ffffff" stop-opacity="1"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/></linearGradient>'
+
 const REDUCED = '@media (prefers-reduced-motion: reduce){.pbm-an{animation:none!important}}'
 
 const dotColor = (m: MainModel): string => (m.mode === 'idle' ? (m.isDone ? DONE : IDLE) : ACCENT)
@@ -171,8 +256,18 @@ export const mainRowGeometry = (width: number): { W: number; titleSlot: number; 
 }
 
 /**
+ * The main row's seed: the turn (when it started), the mode and whether a
+ * finished flow is shown, never the clock. mainRowSvg mixes the title in, so
+ * a new flow or task-list item reshuffles too; within one, every redraw draws
+ * the same picture.
+ */
+export const turnSeed = (startedAt: number | null, m: Pick<MainModel, 'mode' | 'isDone'>): number =>
+  strHash(`${startedAt ?? 0}|${m.mode}|${m.isDone ? 'done' : ''}`)
+
+/**
  * The row's SVG, `width` × MAIN_H. With `hasBranch` (agent rows shown below)
- * a trunk runs from just below the dot down to the row's bottom edge.
+ * a trunk runs from just below the dot down to the row's bottom edge. The
+ * same model, width and seed always give the same string.
  */
 export function mainRowSvg(m: MainModel, width: number, seed = 0, hasBranch = false): string {
   const { W, titleSlot, barX: BAR_X, barW: BAR_W } = mainRowGeometry(width)
@@ -202,29 +297,36 @@ export function mainRowSvg(m: MainModel, width: number, seed = 0, hasBranch = fa
     `<text x="${f2(x + pillW / 2)}" y="${f2(BAR_H / 2 + 3.6)}" text-anchor="middle" font-family="${FONT}" font-size="${PILL_SIZE}" font-weight="600" fill="#ffffff">${xml(pillText)}</text>`
 
   if (m.mode === 'flow') {
-    const ratio = unit(m.ratio)
+    // Whole percent, as the right text rounds it: an estimate's drift (the
+    // time curve of a running worker) moves nothing until its percentage does.
+    const ratio = wholePercent(m.ratio)
     const fillW = Math.round(BAR_W * ratio)
-    const runW = Math.round(BAR_W * Math.max(ratio, unit(m.runRatio)))
+    const runW = Math.round(BAR_W * Math.max(ratio, wholePercent(m.runRatio)))
     const cols = Math.floor(fillW / CELL)
+    const runCols = Math.floor(runW / CELL)
     // Flowing colors: a repeating gradient rect, one period wider than the
     // bar, slides left by one period in 1s, seen through the dithered cells (a mask).
     const P = Math.max(90, Math.round(BAR_W * (0.45 + rnd() * 0.3)))
+    const fillCells = cells(0, cols, 'pbm-w', ramp(cols), look)
+    // Handed to workers, not yet accepted: a faint second layer.
+    const runCells = runCols > cols ? cells(cols, runCols, 'pbm-w', () => 0.2, { ...look, ox: look.ox + 7 }, 1.7) : ''
     defs +=
       gradient('pbm-grad', FLOW_STOPS, BAR_W) +
       gradient('pbm-rep', FLOW_CYCLE, P, true) +
-      '<linearGradient id="pbm-shine" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#ffffff" stop-opacity="0"/>' +
-      '<stop offset="0.5" stop-color="#ffffff" stop-opacity="1"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/></linearGradient>' +
+      SHINE +
+      cometGrad('pbm-cg', '#378ADD', '#1D9E75') +
       `<clipPath id="pbm-fclip"><rect width="${fillW}" height="${BAR_H}" rx="${BAR_R}"/></clipPath>` +
-      `<mask id="pbm-cm" maskUnits="userSpaceOnUse" x="0" y="0" width="${BAR_W}" height="${BAR_H}"><g fill="#ffffff">${cells(0, cols, 'pbm-w', ramp(cols), look)}</g></mask>`
-    css += twinkleCss('pbm-w', look, rnd, 0.15, 0.5)
+      `<mask id="pbm-cm" maskUnits="userSpaceOnUse" x="0" y="0" width="${BAR_W}" height="${BAR_H}"><g fill="#ffffff">${fillCells}</g></mask>`
+    // Drawn always (it takes its draws from rnd), kept only when cells twinkle:
+    // an empty bar then has no animation, so a surface treats it as a still picture.
+    const twinkle = twinkleCss('pbm-w', look, rnd, 0.15, 0.5)
+    if (fillCells || runCells) css += twinkle
     if (cols > 0) {
       body += `<g mask="url(#pbm-cm)"><rect class="pbm-fl pbm-an" width="${BAR_W + P}" height="${BAR_H}" fill="url(#pbm-rep)"/></g>`
       css += `.pbm-fl{animation:pbm-flow 1s linear infinite}@keyframes pbm-flow{from{transform:translateX(0px)}to{transform:translateX(${-P}px)}}`
     }
-    // Handed to workers, not yet accepted: a faint second layer.
-    const runCols = Math.floor(runW / CELL)
-    if (runCols > cols) {
-      body += `<g fill="url(#pbm-grad)" opacity="0.45">${cells(cols, runCols, 'pbm-w', () => 0.2, { ...look, ox: look.ox + 7 }, 1.7)}</g>`
+    if (runCells) {
+      body += `<g fill="url(#pbm-grad)" opacity="0.45">${runCells}</g>`
     }
     if (fillW > 0) {
       // Shimmer: 1-2 soft white bands of random width, phase and strength,
@@ -240,12 +342,15 @@ export function mainRowSvg(m: MainModel, width: number, seed = 0, hasBranch = fa
           `.pbm-sh${i}{animation:pbm-sh${i}k ${per}s linear ${f2(-rnd() * per)}s infinite}` +
           `@keyframes pbm-sh${i}k{from{transform:translateX(0px)}to{transform:translateX(${fillW + w}px)}}`
       }
-      body += `<g clip-path="url(#pbm-fclip)">${sh}</g>`
-      // Sparks near the fill head (left of the pill).
+      // One comet running inside the fill, as in working mode.
+      const cm = comet(0, clamp(fillW * (0.3 + rnd() * 0.2), 12, BAR_W * 0.28), fillW, rnd() < 0.5 ? 0.5 : 1, rnd, look, 'pbm-cg', '#378ADD')
+      body += `<g clip-path="url(#pbm-fclip)">${sh}${cm.svg}</g>`
+      css += cm.css + PULSE_KF
+      // Sparks near the fill head (left of the pill), and a pulsing cap on it.
       const headX = pillText ? Math.max(CELL * 2, fillW - pillW) : fillW
       const sp = sparks(rnd, headX - 48, headX, spIdx)
-      body += sp.svg
-      css += sp.css + SPARK_KF
+      body += sp.svg + cap(headX)
+      css += sp.css + SPARK_KF + CAP_CSS
     }
     // Tick marks between tasks, only past the fill, only when they fit.
     const total = Number.isFinite(m.ticks) ? Math.floor(m.ticks) : 0
@@ -262,37 +367,67 @@ export function mainRowSvg(m: MainModel, width: number, seed = 0, hasBranch = fa
       pill = pillSvg(pillX, colorAt(FLOW_STOPS, (pillX + pillW / 2) / BAR_W))
     }
   } else if (m.mode === 'working') {
-    // Indeterminate: a dithered segment (22-38% of the bar) with a faint ghost
-    // trailing it sweeps across in exactly 1s; the direction alternates with
-    // the seed's parity, so consecutive redraws ping-pong. The gradient lives
-    // in the segment's own space (stops jittered), so its colors travel with it.
-    const segW = Math.max(12, Math.round(BAR_W * (0.22 + rnd() * 0.16)))
-    const cols = Math.floor(segW / CELL)
-    const ghostW = Math.max(CELL * 3, Math.round(segW * (0.35 + rnd() * 0.25)))
-    const ghostCols = Math.floor(ghostW / CELL)
-    const gap = CELL * (1 + Math.floor(rnd() * 3))
-    const j = (): number => (rnd() * 2 - 1) * 0.08
-    const stops: [number, string][] = [
-      [clamp(0.04 + j() / 2, 0, 0.12), ACCENT],
-      [clamp(0.55 + j(), 0.3, 0.8), '#E36FB0'],
-      [clamp(0.96 + j() / 2, 0.88, 1), '#F5B731'],
-    ]
-    defs += gradient('pbm-wgrad', stops, segW) + gradient('pbm-ggrad', [[0, ACCENT], [1, '#E36FB0']], ghostW)
-    css += twinkleCss('pbm-w', look, rnd, 0.15, 0.5)
-    const ghostLook: Look = { ...look, ox: look.ox + 13 }
-    const seg =
-      `<g transform="translate(${-ghostW - gap},0)" fill="url(#pbm-ggrad)" opacity="0.32">${cells(0, ghostCols, 'pbm-w', c => 0.15 + 0.4 * (c / Math.max(1, ghostCols)), ghostLook)}</g>` +
-      `<g fill="url(#pbm-wgrad)">${cells(0, cols, 'pbm-w', c => 0.3 + 0.65 * Math.pow(c / Math.max(1, cols), 1.2), look)}</g>`
-    const sp = sparks(rnd, segW - 30, segW, spIdx)
-    const travel = segW + ghostW + gap
-    const reverse = (seedN & 1) === 1
-    const inner = `<g class="pbm-sw pbm-an">${seg}${sp.svg}</g>`
-    body += reverse ? `<g transform="translate(${BAR_W},0) scale(-1,1)">${inner}</g>` : inner
+    // The whole track is alive. A repeating violet → pink → amber gradient,
+    // one period per bar width, flows left → right in 1s, seen through a
+    // twinkling dithered cell mask. Indeterminate (ratio 0): the field is
+    // faint, with 2-3 comets crossing at different speeds and sparks popping.
+    // Determinate (ratio > 0, an estimate): the fill is dense with a shimmer
+    // and a comet inside it, a pulsing cap and sparks at its head; the rest of
+    // the track keeps a very faint field.
+    // Whole percent, as the right text rounds it (a task list moves in steps anyway).
+    const ratio = wholePercent(m.ratio)
+    const fillW = unit(m.ratio) > 0 ? Math.max(CELL * 2, Math.round(BAR_W * ratio)) : 0
+    const fillCols = Math.floor(fillW / CELL)
+    const allCols = Math.floor(BAR_W / CELL)
+    const P = Math.max(60, BAR_W)
+    defs +=
+      gradient('pbm-wrep', WORK_CYCLE, P, true) +
+      cometGrad('pbm-cg', '#E36FB0', '#F5B731') +
+      `<mask id="pbm-wm" maskUnits="userSpaceOnUse" x="0" y="0" width="${BAR_W}" height="${BAR_H}"><g fill="#ffffff">` +
+      cells(0, allCols, 'pbm-w', c => (c < fillCols ? 0.8 + 0.15 * (c / Math.max(1, fillCols)) : 0.45), look) +
+      '</g></mask>'
     css +=
-      sp.css +
+      twinkleCss('pbm-w', look, rnd, 0.2, 0.6) +
+      `.pbm-fl{animation:pbm-flow 1s linear infinite}@keyframes pbm-flow{from{transform:translateX(0px)}to{transform:translateX(${P}px)}}` +
       SPARK_KF +
-      '.pbm-sw{animation:pbm-sweep 1s linear infinite}' +
-      `@keyframes pbm-sweep{from{transform:translateX(${-segW}px)}to{transform:translateX(${BAR_W + travel - segW}px)}}`
+      PULSE_KF
+    const field = (op: string): string =>
+      `<g mask="url(#pbm-wm)"${op ? ` opacity="${op}"` : ''}><rect class="pbm-fl pbm-an" x="${-P}" width="${BAR_W + P}" height="${BAR_H}" fill="url(#pbm-wrep)"/></g>`
+    if (fillW === 0) {
+      body += field('.35')
+      const n = rnd() < 0.5 ? 2 : 3
+      const reverse = (seedN & 1) === 1
+      for (let i = 0; i < n; i++) {
+        const per = i === 0 ? 1 : i === 1 ? 0.5 : rnd() < 0.5 ? 0.5 : 1
+        const cm = comet(i, BAR_W * (0.12 + rnd() * 0.16), BAR_W, per, rnd, look, 'pbm-cg', '#E36FB0', reverse && i === n - 1)
+        body += cm.svg
+        css += cm.css
+      }
+      const sp = sparks(rnd, 0, BAR_W, spIdx, 6 + Math.floor(rnd() * 5))
+      body += sp.svg
+      css += sp.css
+    } else {
+      defs +=
+        SHINE +
+        `<clipPath id="pbm-fclip"><rect width="${fillW}" height="${BAR_H}" rx="${BAR_R}"/></clipPath>` +
+        `<clipPath id="pbm-eclip"><rect x="${fillW}" width="${Math.max(0, BAR_W - fillW)}" height="${BAR_H}"/></clipPath>`
+      const w = Math.round(24 + rnd() * 30)
+      const cm = comet(0, clamp(fillW * (0.3 + rnd() * 0.2), 12, BAR_W * 0.28), fillW, rnd() < 0.5 ? 0.5 : 1, rnd, look, 'pbm-cg', '#E36FB0')
+      body +=
+        `<g clip-path="url(#pbm-eclip)">${field('.12')}</g>` +
+        `<g clip-path="url(#pbm-fclip)">${field('')}` +
+        `<rect class="pbm-sh0 pbm-an" x="${-w}" width="${w}" height="${BAR_H}" fill="url(#pbm-shine)" opacity="${f2(0.4 + rnd() * 0.25)}"/>` +
+        `${cm.svg}</g>`
+      css +=
+        `.pbm-sh0{animation:pbm-sh0k .5s linear ${f2(-rnd() * 0.5)}s infinite}` +
+        `@keyframes pbm-sh0k{from{transform:translateX(0px)}to{transform:translateX(${fillW + w}px)}}` +
+        cm.css +
+        CAP_CSS
+      // Sparks just ahead of the head, then the cap on it.
+      const sp = sparks(rnd, fillW + CELL, Math.min(BAR_W, fillW + 36), spIdx, 3 + Math.floor(rnd() * 3))
+      body += sp.svg + cap(fillW)
+      css += sp.css
+    }
     if (pillText) pill = pillSvg(0, ACCENT)
   } else if (m.isDone) {
     // Idle after a finished flow: green dither with a slow, faint glow at a random phase.

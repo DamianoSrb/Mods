@@ -15,6 +15,7 @@ export const STRINGS = {
     design: 'Design',
     tasks: 'Attività',
     review: 'Revisione',
+    step: 'Passo',
     lastTurn: 'ultimo turno',
     tool: 'tool',
     tools: 'tool',
@@ -32,6 +33,7 @@ export const STRINGS = {
     design: 'Design',
     tasks: 'Tasks',
     review: 'Review',
+    step: 'Step',
     lastTurn: 'last turn',
     tool: 'tool',
     tools: 'tools',
@@ -147,6 +149,34 @@ export const fmtTime = (ms: number): string => {
   const ss = String(s % 60).padStart(2, '0')
   return h ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`
 }
+
+/**
+ * Whole minutes, for a time drawn inside an Svg: "<1m", "3m", "1h05m".
+ * Floored, so the text (and the picture's source) changes once a minute,
+ * never each second: a remote surface reloads a picture whose source changed.
+ */
+export const fmtMinutes = (ms: number): string => {
+  const m = Math.floor(Math.max(0, Number.isFinite(ms) ? ms : 0) / 60_000)
+  if (m < 1) return '<1m'
+  if (m < 60) return `${m}m`
+  return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}m`
+}
+
+/**
+ * How an elapsed time reads: `clock` m:ss (text surfaces, where a redraw is
+ * free), `minutes` "<1m"/"3m" (inside an Svg, where a new source is a new picture).
+ */
+export type TimeStyle = 'clock' | 'minutes'
+
+export const fmtElapsed = (ms: number, style: TimeStyle = 'clock'): string =>
+  style === 'minutes' ? fmtMinutes(ms) : fmtTime(ms)
+
+/**
+ * A 0..1 ratio rounded to whole percent, as a drawn percentage rounds it, so
+ * a fill drawn from it moves only when its percentage does (sub-percent drift
+ * of an estimate never changes a picture's source).
+ */
+export const wholePercent = (n: number): number => (Number.isFinite(n) ? Math.round(Math.max(0, Math.min(1, n)) * 100) / 100 : 0)
 
 const TIERS = new Set(['fable', 'heavy', 'careful', 'medium', 'light'])
 

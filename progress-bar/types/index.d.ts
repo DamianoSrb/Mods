@@ -52,6 +52,21 @@ export type ProgressBarAgentRun = {
 /** System RAM in use, in bytes, as the RAM card reads it. */
 export type ProgressBarRam = { usedBytes: number; totalBytes: number }
 
+export type ProgressBarPlanStatus = 'pending' | 'in_progress' | 'completed'
+
+/** One item of the main loop's task list. */
+export type ProgressBarPlanItem = { title: string; status: ProgressBarPlanStatus }
+
+/**
+ * The main loop's task list, as seen in its tool calls (the desktop's
+ * `mcp__ccd_turn__update_plan`, the CLI's `TodoWrite`), in order.
+ */
+export type ProgressBarPlan = {
+  items: ProgressBarPlanItem[]
+  /** When it last changed ($.clock time). */
+  at: number
+}
+
 
 declare module 'claude-code' {
   interface PluginState {
@@ -60,6 +75,8 @@ declare module 'claude-code' {
       flow: ProgressBarFlow | null
       /** The subagent runs of this session, oldest first. */
       agents: ProgressBarAgentRun[]
+      /** The main loop's task list; kept until replaced, cleared when a new turn starts after it was completed. */
+      plan: ProgressBarPlan | null
       /** When the last main-loop prompt was submitted. */
       startedAt: ProgressBarMoment
       /** When the last main-loop turn completed. */
