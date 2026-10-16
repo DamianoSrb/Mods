@@ -37,34 +37,25 @@ const glyph = (cy: number): string => {
 }
 
 /**
- * The desktop card, `width` × `height` (RAM_CARD_W × RAM_CARD_H by default):
- * chip icon, a load bar taking the free space, `9.8/16 GB`. Under ~110px it
- * drops the icon, under ~80px (or with `isPercentOnly`) it shows only the
- * percent; "RAM –" with no reading yet, "RAM ?" when `error` says why none
- * could be taken (the reason goes in its aria-label).
+ * What a reader is told of the RAM figures (an Svg's alt, an aria-label):
+ * always short, never the reason a reading failed. `RAM 9.8/16 GB`, `RAM ?`
+ * after a failure, `RAM` before any reading.
  */
-export function ramCardSvg(
-  r: RamInfo | null,
-  width = RAM_CARD_W,
-  height = RAM_CARD_H,
-  isPercentOnly = false,
-  error: string | null = null,
-): string {
-  const w = Math.max(24, Math.round(width))
-  const h = Math.max(14, Math.round(height))
+export function ramAltText(r: RamInfo | null, error: string | null = null): string {
+  return r ? `RAM ${fmtRamPair(r)}` : error ? 'RAM ?' : 'RAM'
+}
+
+// The card's elements, without an <svg> wrapper or its <style>: drawn at the
+// origin, `w` × `h`. Shared by the standalone card and the right zone.
+function ramCardBody(r: RamInfo | null, w: number, h: number, isPercentOnly: boolean, error: string | null): string {
   const cy = h / 2
   const baseline = (cy + 4).toFixed(1)
   const hasIcon = w >= ICON_MIN_W && !isPercentOnly
   const barX = hasIcon ? PAD + GLYPH_W + 6 : PAD
   const textR = w - PAD
   const head =
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" ` +
-    `viewBox="0 0 ${w} ${h}" role="img" aria-label="${xml(r ? `RAM ${fmtRamPair(r)}` : error ? `RAM ? (${error})` : 'RAM')}">` +
-    STYLE +
-    `<rect id="pbram-card" class="k" x="0" y="0" width="${w}" height="${h}" rx="6"/>` +
-    (hasIcon ? glyph(cy) : '')
-  if (!r)
-    return `${head}<text id="pbram-label" class="s" x="${barX}" y="${baseline}">${error ? 'RAM ?' : 'RAM –'}</text></svg>`
+    `<rect id="pbram-card" class="k" x="0" y="0" width="${w}" height="${h}" rx="6"/>` + (hasIcon ? glyph(cy) : '')
+  if (!r) return `${head}<text id="pbram-label" class="s" x="${barX}" y="${baseline}">${error ? 'RAM ?' : 'RAM –'}</text>`
 
   const ratio = ramRatio(r)
   if (w < PAIR_MIN_W || isPercentOnly) {
@@ -72,8 +63,7 @@ export function ramCardSvg(
     const pct = `${Math.round(ratio * 100)}%`
     return (
       head +
-      `<text id="pbram-text" x="${(w / 2).toFixed(1)}" y="${baseline}" text-anchor="middle" fill="${ramColor(ratio)}">${xml(pct)}</text>` +
-      '</svg>'
+      `<text id="pbram-text" x="${(w / 2).toFixed(1)}" y="${baseline}" text-anchor="middle" fill="${ramColor(ratio)}">${xml(pct)}</text>`
     )
   }
   const maxText = textR - barX - MIN_BAR - 6
@@ -87,7 +77,31 @@ export function ramCardSvg(
     (fillW > 0
       ? `<rect id="pbram-fill" x="${barX}" y="${barY}" width="${Math.max(2, fillW).toFixed(1)}" height="4" rx="2" fill="${ramColor(ratio)}"/>`
       : '') +
-    `<text id="pbram-text" class="t" x="${textR}" y="${baseline}" text-anchor="end">${xml(label)}</text>` +
+    `<text id="pbram-text" class="t" x="${textR}" y="${baseline}" text-anchor="end">${xml(label)}</text>`
+  )
+}
+
+/**
+ * The desktop card, `width` × `height` (RAM_CARD_W × RAM_CARD_H by default):
+ * chip icon, a load bar taking the free space, `9.8/16 GB`. Under ~110px it
+ * drops the icon, under ~80px (or with `isPercentOnly`) it shows only the
+ * percent; "RAM –" with no reading yet, "RAM ?" when `error` is set and there
+ * is no reading (its aria-label stays short: ramAltText).
+ */
+export function ramCardSvg(
+  r: RamInfo | null,
+  width = RAM_CARD_W,
+  height = RAM_CARD_H,
+  isPercentOnly = false,
+  error: string | null = null,
+): string {
+  const w = Math.max(24, Math.round(width))
+  const h = Math.max(14, Math.round(height))
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" ` +
+    `viewBox="0 0 ${w} ${h}" role="img" aria-label="${xml(ramAltText(r, error))}">` +
+    STYLE +
+    ramCardBody(r, w, h, isPercentOnly, error) +
     '</svg>'
   )
 }
@@ -123,6 +137,9 @@ const ZONE_CARD_MAX = 160
  * The desktop band's right zone, `width` × `height`: a 1px divider down its
  * left edge (the whole band tall) and the RAM card, centered in the area right
  * of the divider and top-aligned with the main bar (RAM_CARD_H tall).
+ *
+ * One <svg> only: the card's elements sit in a translated <g>, its style at
+ * the root (a nested <svg> is not drawn by every surface).
  */
 export function rightZoneSvg(r: RamInfo | null, error: string | null, width: number, height: number): string {
   const w = Math.max(ZONE_LEFT + 24, Math.round(width))
@@ -130,15 +147,15 @@ export function rightZoneSvg(r: RamInfo | null, error: string | null, width: num
   const area = w - ZONE_LEFT
   const cardW = Math.max(24, Math.min(ZONE_CARD_MAX, area - 8))
   const cardX = ZONE_LEFT + Math.round((area - cardW) / 2)
-  const card = ramCardSvg(r, cardW, RAM_CARD_H, false, error).replace(
-    '<svg xmlns="http://www.w3.org/2000/svg" ',
-    `<svg id="pbz-card" x="${cardX}" y="0" `,
-  )
   return (
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">` +
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" ` +
+    `role="img" aria-label="${xml(ramAltText(r, error))}">` +
     ZONE_STYLE +
+    STYLE +
     `<line id="pbz-line" class="pbz-l" x1="0.5" y1="2" x2="0.5" y2="${h - 2}" stroke-width="1"/>` +
-    card +
+    `<g id="pbz-card" transform="translate(${cardX},0)">` +
+    ramCardBody(r, cardW, RAM_CARD_H, false, error) +
+    '</g>' +
     '</svg>'
   )
 }

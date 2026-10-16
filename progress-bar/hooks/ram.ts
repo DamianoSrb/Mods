@@ -3,17 +3,25 @@
 // hands the text here. No `$` here.
 
 export type RamInfo = { usedBytes: number; totalBytes: number }
-/** Which parser reads a probe's output. */
-export type RamFormat = 'win32' | 'wmic' | 'darwin' | 'linux'
+/**
+ * Which parser reads a probe's output. 'typeperf' gives only the available
+ * memory: it needs the total of an earlier reading.
+ */
+export type RamFormat = 'win32' | 'typeperf' | 'darwin' | 'linux'
 export type RamProbe =
-  | { kind: 'run'; argv: string[]; format: RamFormat }
+  | { kind: 'run'; argv: string[]; format: RamFormat; timeoutMs: number }
   | { kind: 'file'; path: string; format: RamFormat }
 
 /** How often register.tsx re-reads the RAM figures. */
-export const RAM_POLL_MS = 5000
+export const RAM_POLL_MS = 10000
+/** A failed poll stays silent while the last good reading is younger than this. */
+export const RAM_GRACE_MS = 60000
 
 const WIN_SCRIPT =
   '$o=Get-CimInstance Win32_OperatingSystem; "$($o.TotalVisibleMemorySize) $($o.FreePhysicalMemory)"'
+
+// typeperf's counter path is localized: English first, then Italian.
+const TYPEPERF_COUNTERS = ['\\Memory\\Available MBytes', '\\Memoria\\MByte disponibili']
 
 /**
  * What to run or read on `platform` ('win32' | 'darwin' | 'linux'), in the
@@ -28,15 +36,20 @@ export function ramProbes(platform: string): RamProbe[] {
           kind: 'run',
           argv: ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', WIN_SCRIPT],
           format: 'win32',
+          // A cold PowerShell start can take several seconds.
+          timeoutMs: 15000,
         },
-        {
-          kind: 'run',
-          argv: ['cmd.exe', '/c', 'wmic OS get FreePhysicalMemory,TotalVisibleMemorySize /value'],
-          format: 'wmic',
-        },
+        ...TYPEPERF_COUNTERS.map(
+          (counter): RamProbe => ({
+            kind: 'run',
+            argv: ['typeperf.exe', counter, '-sc', '1'],
+            format: 'typeperf',
+            timeoutMs: 10000,
+          }),
+        ),
       ]
     case 'darwin':
-      return [{ kind: 'run', argv: ['sh', '-c', 'sysctl -n hw.memsize; vm_stat'], format: 'darwin' }]
+      return [{ kind: 'run', argv: ['sh', '-c', 'sysctl -n hw.memsize; vm_stat'], format: 'darwin', timeoutMs: 4000 }]
     case 'linux':
       return [{ kind: 'file', path: '/proc/meminfo', format: 'linux' }]
     default:
@@ -68,19 +81,28 @@ function parseWin(out: string): RamInfo | null {
   return null
 }
 
-function parseWmic(out: string): RamInfo | null {
-  // "FreePhysicalMemory=6291456" and "TotalVisibleMemorySize=16777216" (KB), any order.
-  const kb = (key: string): number | null => {
-    for (const l of lines(out)) {
-      const m = /^([A-Za-z]+)\s*=\s*(\d+)$/.exec(l)
-      if (m && m[1]?.toLowerCase() === key.toLowerCase()) return Number(m[2]) * 1024
-    }
-    return null
-  }
-  const total = kb('TotalVisibleMemorySize')
-  const free = kb('FreePhysicalMemory')
-  if (total === null || free === null || free > total) return null
-  return info(total, total - free)
+/**
+ * typeperf's CSV (`-sc 1`): a header line, then `"<timestamp>","<value>"`,
+ * among blank and localized status lines. The last CSV line's last quoted
+ * value is the available memory in MB; null when it is not a number (no
+ * sample, header only, an error message).
+ */
+export function parseTypeperfAvailableMB(out: string): number | null {
+  if (typeof out !== 'string') return null
+  const csv = lines(out).filter(l => l.startsWith('"'))
+  const last = csv[csv.length - 1]
+  if (!last) return null
+  const values = [...last.matchAll(/"([^"]*)"/g)].map(m => m[1] ?? '')
+  const v = (values[values.length - 1] ?? '').trim().replace(/^(\d+),(\d+)$/, '$1.$2')
+  return /^\d+(\.\d+)?$/.test(v) ? Number(v) : null
+}
+
+function parseTypeperf(out: string, totalBytes: number | null): RamInfo | null {
+  const mb = parseTypeperfAvailableMB(out)
+  if (mb === null || totalBytes === null || !(totalBytes > 0)) return null
+  const avail = mb * 1024 * 1024
+  if (avail > totalBytes) return null
+  return info(totalBytes, totalBytes - avail)
 }
 
 function parseMac(out: string): RamInfo | null {
@@ -116,15 +138,17 @@ function parseLinux(out: string): RamInfo | null {
 
 /**
  * The probe's output (stdout, or the file's text) as used/total bytes; null
- * when unreadable. `format` is the probe's (a platform name, or 'wmic').
+ * when unreadable. `format` is the probe's (a platform name, or 'typeperf',
+ * which reads only the available memory and takes the total as
+ * `knownTotalBytes`, from an earlier reading: null without one).
  */
-export function parseRam(format: string, output: string): RamInfo | null {
+export function parseRam(format: string, output: string, knownTotalBytes: number | null = null): RamInfo | null {
   if (typeof output !== 'string' || !output.trim()) return null
   switch (format) {
     case 'win32':
       return parseWin(output)
-    case 'wmic':
-      return parseWmic(output)
+    case 'typeperf':
+      return parseTypeperf(output, knownTotalBytes)
     case 'darwin':
       return parseMac(output)
     case 'linux':

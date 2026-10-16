@@ -108,9 +108,15 @@ function expectZone(n: Node | undefined, cols: number, height: number): void {
   expect(src).toMatch(/RAM|%</)
   const area = w - 8
   const cardW = Math.min(160, area - 8)
-  const m = src.match(/<svg id="pbz-card" x="(\d+)" y="0" width="(\d+)" height="30"/)
-  expect(Number(m?.[2])).toBe(cardW)
-  expect(Math.abs(Number(m?.[1]) - ((area - cardW) / 2 + 8))).toBeLessThanOrEqual(1)
+  // One <svg>: the card is inlined in a translated group, never nested.
+  expect(src.match(/<svg/g)?.length).toBe(1)
+  const x = src.match(/<g id="pbz-card" transform="translate\((\d+),0\)">/)
+  const m = src.match(/<rect id="pbram-card" class="k" x="0" y="0" width="(\d+)" height="30"/)
+  expect(Number(m?.[1])).toBe(cardW)
+  expect(Math.abs(Number(x?.[1]) - ((area - cardW) / 2 + 8))).toBeLessThanOrEqual(1)
+  // The alt is short: never a failure's reason.
+  const alt = String(n?.props?.alt)
+  expect(alt).toMatch(/^RAM( \?| \d+(\.\d)?\/\d+(\.\d)? [KMGT]?B)?$/)
 }
 const ramOf = async (ui: Mounted<Surface, 'AbovePrompt'>): Promise<Node | undefined> =>
   desktopParts(await ui.drawn()).find(n => roleOf(n) === 'ram')
@@ -242,40 +248,86 @@ test('the RAM poll writes the ram atom (Windows probe mocked)', IT, async ($, on
   expect(await drawn(t)).toContain('8/16 GB')
 
   free = 4 * 1024 * 1024
-  await c.advance(5_000)
+  await c.advance(10_000)
   expect(await drawn(ui)).toContain('12/16 GB')
 })
 
-test('PowerShell refused: the wmic fallback reads the RAM', IT, async ($, on) => {
+// What `$.process.run` resolves with.
+const ran = (stdout: string, exitCode = 0) => ({
+  value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+})
+// typeperf's CSV, Italian Windows: `mb` MB available.
+const typeperfOut = (mb: number): string =>
+  '\r\n"(PDH-CSV 4.0)","\\\\PC\\Memoria\\MByte disponibili"\r\n' +
+  `"10/16/2026 13:40:49.703","${mb}.000000"\r\nUscita in corso. Attendere...\r\nEsecuzione comando riuscita.\r\n\r\n`
+const PS_OK = `${16 * 1024 * 1024} ${8 * 1024 * 1024}\r\n`
+const TIMEOUT = 'progress-bar: $.process.run(powershell.exe) aborted: still running after 15000ms'
+
+test('PowerShell probe: 15 s timeout', IT, async ($, on) => {
+  const c = world(on)
+  mock.env(on, { OS: 'Windows_NT' })
+  const timeouts: (number | undefined)[] = []
+  on('process.run', async (_, e) => {
+    timeouts.push(e.init?.timeoutMs)
+    return ran(PS_OK)
+  })
+  await start($)
+  await c.settle()
+  expect(timeouts).toEqual([15000])
+})
+
+test('PowerShell timing out: typeperf (English, then Italian) reads RAM with the cached total', IT, async ($, on) => {
+  const c = world(on)
+  mock.env(on, { OS: 'Windows_NT' })
+  let isPsOk = true
+  const asked: string[] = []
+  on('process.run', async (_, e) => {
+    asked.push(e.argv.slice(0, 2).join(' '))
+    if (e.argv[0] === 'powershell.exe') return isPsOk ? ran(PS_OK) : { deny: TIMEOUT }
+    if (e.argv[1] === '\\Memory\\Available MBytes') return ran('\r\nErrore: nessun contatore valido.\r\n', 1)
+    return ran(typeperfOut(4096))
+  })
+  await start($)
+  await c.settle()
+  const ui = await mount($, 'desktop')
+  expect(await drawn(ui)).toContain('8/16 GB')
+  expect(asked).toEqual(['powershell.exe -NoProfile'])
+
+  isPsOk = false
+  await c.advance(10_000)
+  const ram = await ramOf(ui)
+  // 16 GB known from PowerShell, 4 GB available: 12 GB in use.
+  expect(String(ram?.props?.source)).toContain('12/16 GB')
+  expect(String(ram?.props?.alt)).toBe('RAM 12/16 GB')
+  expect(asked.slice(1)).toEqual([
+    'powershell.exe -NoProfile',
+    'typeperf.exe \\Memory\\Available MBytes',
+    'typeperf.exe \\Memoria\\MByte disponibili',
+  ])
+  // The probe that worked is tried first from then on.
+  await c.advance(10_000)
+  expect(asked.slice(4)).toEqual(['typeperf.exe \\Memoria\\MByte disponibili'])
+})
+
+test('no total known yet: typeperf is not run and the card shows RAM ?', IT, async ($, on) => {
   const c = world(on)
   mock.env(on, { OS: 'Windows_NT' })
   const asked: string[] = []
   on('process.run', async (_, e) => {
     asked.push(e.argv[0] ?? '')
-    if (e.argv[0] === 'powershell.exe') return { deny: 'not on this surface' }
-    return {
-      value: {
-        exitCode: 0,
-        stdout: '\r\r\nFreePhysicalMemory=4194304\r\r\nTotalVisibleMemorySize=16777216\r\r\n',
-        stderr: '',
-        isStdoutTruncated: false,
-        isStderrTruncated: false,
-      },
-    }
+    if (e.argv[0] === 'powershell.exe') return { deny: TIMEOUT }
+    return ran(typeperfOut(4096))
   })
   await start($)
   await c.settle()
   const ui = await mount($, 'desktop')
-  const text = await drawn(ui)
-  expect(text).toContain('12/16 GB')
-  expect(text).not.toContain('RAM ?')
-  expect(asked).toEqual(['powershell.exe', 'cmd.exe'])
-  // The probe that worked is tried first from then on.
-  await c.advance(5_000)
-  expect(asked.slice(2)).toEqual(['cmd.exe'])
+  const ram = await ramOf(ui)
+  expect(String(ram?.props?.source)).toContain('>RAM ?</text>')
+  expect(String(ram?.props?.alt)).toBe('RAM ?')
+  expect(asked).toEqual(['powershell.exe'])
 })
 
-test('every probe failing: RAM ? with the reason in alt, logged once', IT, async ($, on) => {
+test('a failed poll within 60 s keeps the last reading; past 60 s RAM ?, logged once', IT, async ($, on) => {
   const c = world(on)
   mock.env(on, { OS: 'Windows_NT' })
   const logs: string[] = []
@@ -283,26 +335,100 @@ test('every probe failing: RAM ? with the reason in alt, logged once', IT, async
     logs.push(e.text)
     return next(e)
   })
+  let isOk = true
   on('process.run', async (_, e) => {
-    if (e.argv[0] === 'powershell.exe') return { deny: 'blocked' }
-    return {
-      value: { exitCode: 1, stdout: '', stderr: 'wmic: not found', isStdoutTruncated: false, isStderrTruncated: false },
-    }
+    if (isOk) return ran(PS_OK)
+    if (e.argv[0] === 'powershell.exe') return { deny: TIMEOUT }
+    return ran('\r\nErrore: nessun contatore valido.\r\n', 1)
   })
+  await start($)
+  await c.settle()
+  const ui = await mount($, 'desktop')
+  const t = await mount($, 'terminal')
+  expect(await drawn(ui)).toContain('8/16 GB')
+
+  isOk = false
+  // t+10 s: failed, the reading stays, nothing said.
+  await c.advance(10_000)
+  let ram = await ramOf(ui)
+  expect(String(ram?.props?.source)).toContain('8/16 GB')
+  expect(String(ram?.props?.source)).not.toContain('RAM ?')
+  expect(String(ram?.props?.alt)).toBe('RAM 8/16 GB')
+  expect(await drawn(t)).toContain('8/16 GB')
+  expect(await drawn(t)).not.toContain('RAM ?')
+  // t+50 s: still within the grace time.
+  await c.advance(40_000)
+  expect(String((await ramOf(ui))?.props?.source)).toContain('8/16 GB')
+  expect(logs.filter(l => l.includes('RAM unavailable'))).toHaveLength(0)
+
+  // t+70 s: no success for over 60 s.
+  await c.advance(20_000)
+  ram = await ramOf(ui)
+  expectZone(ram, 100, 30)
+  expect(String(ram?.props?.source)).toContain('>RAM ?</text>')
+  expect(String(ram?.props?.source)).not.toContain('8/16 GB')
+  const alt = String(ram?.props?.alt)
+  expect(alt).toBe('RAM ?')
+  expect(alt).not.toContain('process.run')
+  expect(await drawn(t)).toContain('RAM ?')
+  expect(await drawn(t)).not.toContain('process.run')
+
+  await c.advance(30_000)
+  const ramLogs = logs.filter(l => l.includes('RAM unavailable'))
+  expect(ramLogs).toHaveLength(1)
+  // The full reason chain goes to the log only.
+  expect(ramLogs[0]).toContain('still running after 15000ms')
+  expect(ramLogs[0]).toContain('typeperf.exe exit 1')
+
+  // A success clears it.
+  isOk = true
+  await c.advance(10_000)
+  expect(String((await ramOf(ui))?.props?.source)).toContain('8/16 GB')
+})
+
+test('polls never overlap: a slow probe makes the next ticks skip', IT, async ($, on) => {
+  const c = world(on)
+  mock.env(on, { OS: 'Windows_NT' })
+  let calls = 0
+  on('process.run', async () => {
+    calls++
+    // Every call after the first takes 25 s.
+    if (calls > 1) await c.sleep(25_000)
+    return ran(PS_OK)
+  })
+  await start($)
+  await c.settle()
+  expect(calls).toBe(1)
+  // t+10 s starts a 25 s probe; the ticks at t+20 s and t+30 s find it running.
+  await c.advance(34_000)
+  expect(calls).toBe(2)
+  // It ended at t+35 s: the tick at t+40 s polls again.
+  await c.advance(6_000)
+  expect(calls).toBe(3)
+})
+
+test('every probe failing from the start: RAM ? with a short alt, the reason logged once', IT, async ($, on) => {
+  const c = world(on)
+  mock.env(on, { OS: 'Windows_NT' })
+  const logs: string[] = []
+  on('ui.log', async (_, e, next) => {
+    logs.push(e.text)
+    return next(e)
+  })
+  on('process.run', async () => ({ deny: 'blocked' }))
   await start($)
   await c.settle()
   const ui = await mount($, 'desktop')
   const ram = await ramOf(ui)
   expectZone(ram, 100, 30)
   expect(String(ram?.props?.source)).toContain('>RAM ?</text>')
-  const alt = String(ram?.props?.alt)
-  expect(alt).toContain('RAM ?')
-  expect(alt).toContain('process.run refused')
-  expect(alt).toContain('cmd.exe exit 1: wmic: not found')
+  expect(String(ram?.props?.alt)).toBe('RAM ?')
+  expect(String(ram?.props?.source)).not.toContain('process.run')
   const t = await mount($, 'terminal')
   expect(await drawn(t)).toContain('RAM ?')
+  expect(await drawn(t)).not.toContain('process.run')
 
-  await c.advance(15_000)
+  await c.advance(30_000)
   const ramLogs = logs.filter(l => l.includes('RAM unavailable'))
   expect(ramLogs).toHaveLength(1)
   expect(ramLogs[0]).toContain('process.run refused')
@@ -317,10 +443,10 @@ test('linux: /proc/meminfo through fs.read; a later parse failure keeps the valu
   const ui = await mount($, 'desktop')
   expect(await drawn(ui)).toContain('8/16 GB')
   text = 'nonsense'
-  await c.advance(5_000)
+  await c.advance(10_000)
   const ram = await ramOf(ui)
   expect(String(ram?.props?.source)).toContain('8/16 GB')
-  expect(String(ram?.props?.alt)).toContain('parse failed (linux)')
+  expect(String(ram?.props?.alt)).toBe('RAM 8/16 GB')
 })
 
 for (const count of [1, 3]) {

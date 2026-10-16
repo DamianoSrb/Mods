@@ -12,8 +12,8 @@ import {
 import { STRINGS, fmtTokens, pickLang, type Lang, type TerminalUi } from './shared'
 import { MAIN_H, mainRowSvg, mainRowTerminal } from './main-row'
 import { AGENT_ROW_H, agentRowSvg, agentRowTerminal, type Branch } from './agent-rows'
-import { RAM_POLL_MS, fmtRamPair, parseRam, ramProbes, type RamInfo, type RamProbe } from './ram'
-import { ramCardTerminal, rightZoneSvg } from './ram-card'
+import { RAM_GRACE_MS, RAM_POLL_MS, fmtRamPair, parseRam, ramProbes, type RamInfo, type RamProbe } from './ram'
+import { ramAltText, ramCardTerminal, rightZoneSvg } from './ram-card'
 
 // This mod's own values; it tracks everything itself.
 const flow = atom({ plugin: 'progress-bar', key: 'flow' } as const, null as Flow | null)
@@ -25,7 +25,8 @@ const now = atom({ plugin: 'progress-bar', key: 'now' } as const, 0)
 const isExpanded = atom({ plugin: 'progress-bar', key: 'isExpanded' } as const, false)
 // System RAM in use, polled every RAM_POLL_MS; null until the first reading.
 const ram = atom({ plugin: 'progress-bar', key: 'ram' } as const, null as RamInfo | null)
-// Why the last RAM reading failed (every probe tried), or null once one succeeds.
+// A short code ('timeout' | 'unavailable') once no reading succeeded for
+// RAM_GRACE_MS (or none ever), or null: the card then shows `RAM ?`.
 const ramError = atom({ plugin: 'progress-bar', key: 'ramError' } as const, null as string | null)
 
 // ---------------------------------------------------------------------------
@@ -36,7 +37,11 @@ let ramPlatform: string | null = null
 let isRamPolling = false
 // The probe that last worked: tried first on the next poll.
 let ramProbeIndex = 0
-// The failure reason goes to the transcript once per load, not every 5s.
+// The total of the last reading that had one (PowerShell's): typeperf reads only the available memory.
+let ramKnownTotal: number | null = null
+// When the last reading succeeded ($.clock time), or null before any.
+let ramLastOkAt: number | null = null
+// The full failure reason goes to the transcript once per load, never to the card.
 let isRamErrorLogged = false
 
 function logRamErrorOnce($: EngineInterface, reason: string): void {
@@ -46,13 +51,33 @@ function logRamErrorOnce($: EngineInterface, reason: string): void {
     // Declared on every surface in the d.ts; the validator forbids probing `$.ui` as a value.
     $.ui.log(`progress-bar: RAM unavailable: ${reason}`)
   } catch {
-    // No transcript here: the card's alt still says why.
+    // No transcript here: the card still shows RAM ?.
   }
 }
 
-async function setRamError($: EngineInterface, reason: string): Promise<void> {
-  const text = reason.trim().slice(0, 160) || 'failed'
-  if ((await read($, ramError)) !== text) await update($, ramError, () => text)
+// The short code a failed poll's reasons come to.
+const ramErrorCode = (reason: string): string =>
+  /still running after|timed? ?out/i.test(reason) ? 'timeout' : 'unavailable'
+
+/**
+ * A poll failed for `reason` (every probe's, joined). While the last good
+ * reading is younger than RAM_GRACE_MS nothing changes: the card keeps it.
+ * Past that, or with no reading ever, ramError takes a short code (the card
+ * shows `RAM ?`) and the full reason is logged, once per load.
+ */
+async function ramPollFailed($: EngineInterface, reason: string): Promise<void> {
+  if (ramLastOkAt !== null) {
+    let at: number | null = null
+    try {
+      at = await $.clock.now()
+    } catch {
+      // No clock: treat the reading as stale.
+    }
+    if (at !== null && at - ramLastOkAt < RAM_GRACE_MS) return
+  }
+  const text = reason.trim() || 'failed'
+  const code = ramErrorCode(text)
+  if ((await read($, ramError)) !== code) await update($, ramError, () => code)
   logRamErrorOnce($, text)
 }
 
@@ -84,11 +109,13 @@ const isRamChanged = (prev: RamInfo | null, next: RamInfo): boolean =>
 
 /** One probe's reading, or why it gave none. */
 async function readProbe($: EngineInterface, probe: RamProbe): Promise<RamInfo | string> {
+  // typeperf gives the available memory only: no total yet, no reading (and nothing run).
+  if (probe.format === 'typeperf' && ramKnownTotal === null) return 'no total yet (typeperf)'
   let output: string
   if (probe.kind === 'run') {
     let res: { exitCode: number; stdout: string; stderr: string }
     try {
-      res = await $.process.run(probe.argv, { timeoutMs: 4000 })
+      res = await $.process.run(probe.argv, { timeoutMs: probe.timeoutMs })
     } catch (err) {
       return `process.run refused: ${errorText(err)} (${probe.argv[0]})`
     }
@@ -104,18 +131,19 @@ async function readProbe($: EngineInterface, probe: RamProbe): Promise<RamInfo |
       return `fs.read refused: ${errorText(err)} (${probe.path})`
     }
   }
-  return parseRam(probe.format, output) ?? `parse failed (${probe.format})`
+  return parseRam(probe.format, output, ramKnownTotal) ?? `parse failed (${probe.format})`
 }
 
 async function pollRam($: EngineInterface): Promise<void> {
+  // Never two polls at once: a slow probe (up to its timeout) makes the next ticks skip.
   if (isRamPolling) return
   if (!ramPlatform) {
-    await setRamError($, 'platform not detected')
+    await ramPollFailed($, 'platform not detected')
     return
   }
   const probes = ramProbes(ramPlatform)
   if (probes.length === 0) {
-    await setRamError($, `no probe for ${ramPlatform}`)
+    await ramPollFailed($, `no probe for ${ramPlatform}`)
     return
   }
   isRamPolling = true
@@ -133,15 +161,21 @@ async function pollRam($: EngineInterface): Promise<void> {
         continue
       }
       ramProbeIndex = i
+      if (probe.format !== 'typeperf') ramKnownTotal = got.totalBytes
+      try {
+        ramLastOkAt = await $.clock.now()
+      } catch {
+        ramLastOkAt = null
+      }
       if ((await read($, ramError)) !== null) await update($, ramError, () => null)
       const prev = (await read($, ram)) ?? null
       if (isRamChanged(prev, got)) await update($, ram, () => got)
       return
     }
-    // Every probe failed: the last value (if any) stays, the reason is shown.
-    await setRamError($, reasons.join('; '))
+    // Every probe failed: the last value stays, silently within the grace time.
+    await ramPollFailed($, reasons.join('; '))
   } catch (err) {
-    await setRamError($, errorText(err)).catch(() => {})
+    await ramPollFailed($, errorText(err)).catch(() => {})
   } finally {
     isRamPolling = false
   }
@@ -417,6 +451,8 @@ export const register: Register = (on, options) => {
     // With no platform or no probe for it, the first poll records why and no interval starts.
     isRamPolling = false
     ramProbeIndex = 0
+    ramKnownTotal = null
+    ramLastOkAt = null
     void (async () => {
       ramPlatform = await detectPlatform($)
       await pollRam($)
@@ -605,8 +641,9 @@ export const register: Register = (on, options) => {
     const m = buildMainModel({ flow: f, isWorking: e.props.isWorking, startedAt: start, endedAt: end, tools: toolCount, now: at }, s)
     const alt = [m.title, m.pill, m.right].filter(Boolean).join(' · ')
 
-    const ramInfo = (await read($, ram)) ?? null
     const ramErr = (await read($, ramError)) ?? null
+    // Once ramError is set the last reading is stale: the card shows RAM ?.
+    const ramInfo = ramErr ? null : ((await read($, ram)) ?? null)
 
     const rowsAt = Math.max(at, ...list.map(a => a.startedAt))
     const rows = expanded ? buildAgentRows(list, rowsAt) : []
@@ -626,11 +663,8 @@ export const register: Register = (on, options) => {
     const hasBranch = shown.length > 0
 
     const rowAlt = (r: AgentRowModel): string => `${r.title}: ${r.status}, ${r.stat}, ${r.tokens} ${s.tok}, ${r.time}`
-    const ramAlt = ramInfo
-      ? `RAM ${fmtRamPair(ramInfo)}${ramErr ? ` (last reading; ${ramErr})` : ''}`
-      : ramErr
-        ? `RAM ? (${ramErr})`
-        : 'RAM'
+    // Short: `RAM 9.8/16 GB` or `RAM ?`, never a failure's reason (a surface may draw the alt as text).
+    const ramAlt = ramAltText(ramInfo, ramErr)
 
     // By surface, not by table: the terminal draws text even where a table lists Svg.
     if (e.surface !== 'terminal' && 'Svg' in ui) {
