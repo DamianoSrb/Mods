@@ -124,6 +124,15 @@ export function fmtTokens(n: number): string {
 export const xml = (s: string): string =>
   s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c] ?? c)
 
+/**
+ * The opening tag of a band picture designed at `w` × `h`: a viewBox and no
+ * width/height, so a surface drawing the Svg without width/height props fills
+ * the slot's real width and keeps the aspect ratio (the height follows), the
+ * drawing scaled uniformly from its top-left corner. `attrs` go on the root too.
+ */
+export const fluidSvgOpen = (w: number, h: number, attrs = ''): string =>
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" preserveAspectRatio="xMinYMin meet"${attrs}>`
+
 // Rough advance of system UI text, in em; good enough to size a slot.
 const charEm = (ch: string): number =>
   /[\s.,:;'|!il1()[\]]/.test(ch) ? 0.3 : /[A-ZÀ-ÝmwМШЩЖЮ@%]/.test(ch) ? 0.72 : 0.56

@@ -5,7 +5,8 @@
 // over it, comets run through it and a cap pulses at its head; "working"
 // fills the whole track with a flowing violet → pink → amber dithered field
 // crossed by comets (or, with an estimated ratio, a dense fill with the same
-// shimmer, comet, cap and sparks).
+// shimmer, comet, cap and sparks). A finished flow (idle after it, or a flow
+// whose planned runs all ended: model.ts's flowCompletion) is a green dither.
 // The source is a pure function of what the row shows: the seed (twinkle
 // phases, dither pattern, shimmer, comets, sparks) comes from the turn, the
 // mode and the title (turnSeed), never from the clock, and the fill is drawn
@@ -23,6 +24,7 @@ import {
   FONT,
   IDLE,
   fitText,
+  fluidSvgOpen,
   mulberry32,
   noise,
   savvyClasses,
@@ -241,7 +243,7 @@ const SHINE =
 
 const REDUCED = '@media (prefers-reduced-motion: reduce){.pbm-an{animation:none!important}}'
 
-const dotColor = (m: MainModel): string => (m.mode === 'idle' ? (m.isDone ? DONE : IDLE) : ACCENT)
+const dotColor = (m: MainModel): string => (m.isDone ? DONE : m.mode === 'idle' ? IDLE : ACCENT)
 
 /**
  * Fixed geometry for a row `width` px wide: the bar width depends only on
@@ -265,7 +267,8 @@ export const turnSeed = (startedAt: number | null, m: Pick<MainModel, 'mode' | '
   strHash(`${startedAt ?? 0}|${m.mode}|${m.isDone ? 'done' : ''}`)
 
 /**
- * The row's SVG, `width` × MAIN_H. With `hasBranch` (agent rows shown below)
+ * The row's SVG, designed at `width` × MAIN_H: a viewBox only, so the surface
+ * scales it to the slot's real width (fluidSvgOpen). With `hasBranch` (agent rows shown below)
  * a trunk runs from just below the dot down to the row's bottom edge. The
  * same model, width and seed always give the same string.
  */
@@ -296,7 +299,7 @@ export function mainRowSvg(m: MainModel, width: number, seed = 0, hasBranch = fa
     `<rect x="${x}" width="${pillW}" height="${BAR_H}" rx="${BAR_R}" fill="${color}"/>` +
     `<text x="${f2(x + pillW / 2)}" y="${f2(BAR_H / 2 + 3.6)}" text-anchor="middle" font-family="${FONT}" font-size="${PILL_SIZE}" font-weight="600" fill="#ffffff">${xml(pillText)}</text>`
 
-  if (m.mode === 'flow') {
+  if (m.mode === 'flow' && !m.isDone) {
     // Whole percent, as the right text rounds it: an estimate's drift (the
     // time curve of a running worker) moves nothing until its percentage does.
     const ratio = wholePercent(m.ratio)
@@ -430,13 +433,16 @@ export function mainRowSvg(m: MainModel, width: number, seed = 0, hasBranch = fa
     }
     if (pillText) pill = pillSvg(0, ACCENT)
   } else if (m.isDone) {
-    // Idle after a finished flow: green dither with a slow, faint glow at a random phase.
+    // A finished flow: green dither with a slow, faint glow at a random phase.
+    // Idle after it: no pill. A flow completed by its runs (mode flow): the
+    // pill at the full bar's head, green.
     const cols = Math.floor(BAR_W / CELL)
     body += `<g fill="${DONE}">${cells(0, cols, 'pbm-g', ramp(cols), look)}</g>`
     for (let i = 0; i < look.groups; i++) {
       css += `.pbm-g${i}{animation:pbm-glow 4s ease-in-out ${f2(-rnd() * 4)}s infinite}`
     }
     css += '@keyframes pbm-glow{0%,100%{opacity:1}50%{opacity:.82}}'
+    if (m.mode === 'flow' && pillText) pill = pillSvg(Math.max(0, BAR_W - pillW), DONE)
   }
 
   const textY = f2(H / 2 + TITLE_SIZE * 0.36)
@@ -445,7 +451,7 @@ export function mainRowSvg(m: MainModel, width: number, seed = 0, hasBranch = fa
     ? `<text class="pbm-m" x="${W - 1}" y="${rightY}" text-anchor="end" font-family="${FONT}" font-size="${RIGHT_SIZE}" font-variant-numeric="tabular-nums" style="font-variant-numeric:tabular-nums">${xml(right)}</text>`
     : ''
 
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+  return `${fluidSvgOpen(W, H)}
 <style>${savvyClasses('pbm')}${css}${REDUCED}</style>
 <defs><clipPath id="pbm-clip"><rect x="0" y="0" width="${BAR_W}" height="${BAR_H}" rx="${BAR_R}"/></clipPath>${defs}</defs>
 <circle cx="${DOT_X}" cy="${H / 2}" r="${DOT_R}" fill="${dotColor(m)}"/>
@@ -478,7 +484,8 @@ const TERM_RIGHT = 6
 
 export function mainRowTerminal(ui: TerminalUi, m: MainModel, cols: number): JSX.Element {
   const { Box, Text } = ui
-  const done = m.mode === 'idle' && m.isDone
+  // A finished flow, idle after it or completed by its runs: green.
+  const done = m.isDone
   const idle = m.mode === 'idle' && !m.isDone
   const color = done ? DONE : idle ? undefined : ACCENT
   const total = Math.max(12, Math.floor(Number.isFinite(cols) ? cols : 80))

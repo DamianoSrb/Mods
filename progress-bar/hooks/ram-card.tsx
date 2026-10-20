@@ -2,7 +2,7 @@
 // line on the terminal. savvy-progress look (track card, muted label, load
 // colored mini bar, tabular figures). No `$` here.
 import { fmtRamPair, ramColor, ramRatio, type RamInfo } from './ram'
-import { fitText, textWidth, xml, type TerminalUi } from './shared'
+import { fitText, fluidSvgOpen, textWidth, xml, type TerminalUi } from './shared'
 
 export const RAM_CARD_W = 128
 export const RAM_CARD_H = 30
@@ -134,9 +134,11 @@ const ZONE_LEFT = 8
 const ZONE_CARD_MAX = 160
 
 /**
- * The desktop band's right zone, `width` × `height`: a 1px divider down its
- * left edge (the whole band tall) and the RAM card, centered in the area right
- * of the divider and top-aligned with the main bar (RAM_CARD_H tall).
+ * The desktop band's right zone, designed at `width` × `height` (a viewBox
+ * only: the surface scales it to the zone's real width, the height following):
+ * a 1px divider down its left edge (the whole band tall) and the RAM card,
+ * centered in the area right of the divider and top-aligned with the main bar
+ * (RAM_CARD_H tall).
  *
  * One <svg> only: the card's elements sit in a translated <g>, its style at
  * the root (a nested <svg> is not drawn by every surface).
@@ -148,8 +150,7 @@ export function rightZoneSvg(r: RamInfo | null, error: string | null, width: num
   const cardW = Math.max(24, Math.min(ZONE_CARD_MAX, area - 8))
   const cardX = ZONE_LEFT + Math.round((area - cardW) / 2)
   return (
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" ` +
-    `role="img" aria-label="${xml(ramAltText(r, error))}">` +
+    fluidSvgOpen(w, h, ` role="img" aria-label="${xml(ramAltText(r, error))}"`) +
     ZONE_STYLE +
     STYLE +
     `<line id="pbz-line" class="pbz-l" x1="0.5" y1="2" x2="0.5" y2="${h - 2}" stroke-width="1"/>` +

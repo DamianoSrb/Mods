@@ -1,8 +1,10 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock, Mounted } from 'claude-code/testing'
 import type { On } from 'claude-code'
+import { mainRowSvg, turnSeed } from '../hooks/main-row'
 import {
   buildMainModel,
+  flowCompletion,
   flowEstimate,
   percentText,
   planAfterCall,
@@ -60,10 +62,12 @@ const CURVE_AT_240S = 0.8 * (1 - Math.exp(-1))
 // Six decimals: equal enough for ratios built from floats.
 const r6 = (n: number): number => Math.round(n * 1e6) / 1e6
 
-test('percent text: a tilde only when estimated', () => {
+test('percent text: a tilde only when estimated; an estimate stops at ~99%', () => {
   expect(percentText(0.45, true)).toBe('~45%')
   expect(percentText(0.45, false)).toBe('45%')
   expect(percentText(1, false)).toBe('100%')
+  expect(percentText(0.996, true)).toBe('~99%')
+  expect(percentText(1, true)).toBe('~99%')
 })
 
 test('run share: steps, time curve, finished, failed', () => {
@@ -142,6 +146,89 @@ test('flow estimate stays in [done/total, 0.99] and is 1 when finished', () => {
 })
 
 // ---------------------------------------------------------------------------
+// A flow completed by its runs (no done/finished report), pure.
+
+// Two planned tasks, nothing accepted: as when the orchestrator never reports `done`.
+const PAIR: Flow = { ...FLOW, total: 2, done: 0, tasks: (FLOW.tasks ?? []).slice(0, 2) }
+const bothDone = [
+  run({ id: 'r1', description: 'First task', status: 'done', endedAt: 5_000 }),
+  run({ id: 'r2', description: 'Second task', status: 'done', startedAt: 6_000, endedAt: 9_000 }),
+]
+
+test('titles the Agent descriptions did not repeat: the finished runs are counted instead', () => {
+  const renamed = bothDone.map((a, i) => ({ ...a, description: `Renamed ${i}` }))
+  expect(flowCompletion(PAIR, renamed, false)).toEqual({ isComplete: true, planned: 2, succeeded: 2 })
+  // Fewer finished runs than planned tasks: not complete.
+  expect(flowCompletion(PAIR, renamed.slice(0, 1), false).isComplete).toBe(false)
+})
+
+test('every planned task done, nothing running, turn idle: drawn finished (100%, green), the flow untouched', () => {
+  const flow = { ...PAIR, tasks: PAIR.tasks.map(t => ({ ...t })) }
+  const before = JSON.stringify(flow)
+  const m = buildMainModel({ ...base, flow, agents: bothDone, now: 10_000 }, s)
+  expect(m).toMatchObject({
+    mode: 'flow',
+    title: 'Demo',
+    ratio: 1,
+    acceptedRatio: 1,
+    isEstimate: false,
+    pill: 'Attività 2/2',
+    right: '100%',
+    ringPercent: 100,
+    isDone: true,
+    isAnimating: false,
+  })
+  expect(JSON.stringify(flow)).toBe(before)
+  expect(flowCompletion(flow, bothDone, false)).toEqual({ isComplete: true, planned: 2, succeeded: 2 })
+  // Drawn green: the done dither and a green pill, not the flow gradient.
+  const svg = mainRowSvg(m, 640, turnSeed(null, m))
+  expect(svg).toContain('<g fill="#5fbf8f">')
+  expect(svg).toContain('>Attività 2/2</text>')
+  expect(svg).toMatch(/<rect x="\d+" width="\d+" height="22" rx="11" fill="#5fbf8f"\/>/)
+  expect(svg).not.toContain('pbm-grad')
+  expect(svg).toContain('<circle cx="5" cy="15" r="3" fill="#5fbf8f"/>')
+})
+
+test('every planned task done but the turn still working: still the estimate, under 100%', () => {
+  const m = buildMainModel({ ...base, flow: PAIR, agents: bothDone, isWorking: true, now: 10_000 }, s)
+  expect(m).toMatchObject({ mode: 'flow', isDone: false, isEstimate: true, pill: 'Attività 0/2', right: '~90%' })
+  expect(m.ratio).toBeLessThan(1)
+  expect(m.ringPercent).toBeLessThan(100)
+})
+
+test('one task still running, or one without a run: still the estimate', () => {
+  const running = [bothDone[0] as AgentRun, run({ id: 'r2', description: 'Second task', startedAt: 6_000, stepDone: 1, stepTotal: 4 })]
+  const m = buildMainModel({ ...base, flow: PAIR, agents: running, now: 10_000 }, s)
+  // (0.9 + 0.25 × 0.9) / 2
+  expect(m).toMatchObject({ mode: 'flow', isDone: false, isEstimate: true, right: '~56%' })
+  // Any agent running holds it, a task's or not.
+  const other = [...bothDone, run({ id: 'x', description: 'Look around', type: 'Explore', startedAt: 7_000 })]
+  expect(buildMainModel({ ...base, flow: PAIR, agents: other, now: 10_000 }, s)).toMatchObject({ isDone: false, right: '~90%' })
+  // Second task never ran.
+  const one = [bothDone[0] as AgentRun]
+  expect(buildMainModel({ ...base, flow: PAIR, agents: one, now: 10_000 }, s)).toMatchObject({ isDone: false, right: '~45%' })
+})
+
+test('a failed task counts as ended: finished, the pill counting the successful ones', () => {
+  const agents = [bothDone[0] as AgentRun, run({ id: 'r2', description: 'Second task', status: 'failed', startedAt: 6_000, endedAt: 9_000 })]
+  const m = buildMainModel({ ...base, flow: PAIR, agents, now: 10_000 }, s)
+  expect(m).toMatchObject({ mode: 'flow', isDone: true, ratio: 1, right: '100%', ringPercent: 100, pill: 'Attività 1/2' })
+  // A failed run retried and done: its latest run counts.
+  const retried = [...agents, run({ id: 'r3', description: 'Second task', status: 'done', startedAt: 9_500, endedAt: 9_900, round: 2 })]
+  expect(buildMainModel({ ...base, flow: PAIR, agents: retried, now: 10_000 }, s)).toMatchObject({ isDone: true, pill: 'Attività 2/2' })
+})
+
+test('no task titles: `total` ended worker runs complete it', () => {
+  const flow: Flow = { ...PAIR, tasks: [] }
+  const jobs = ['a', 'b'].map((id, i) => run({ id, description: `Job ${id}`, status: 'done', startedAt: i, endedAt: 5_000 }))
+  expect(buildMainModel({ ...base, flow, agents: jobs, now: 10_000 }, s)).toMatchObject({ isDone: true, pill: 'Attività 2/2', right: '100%' })
+  // One run short of the total: the estimate.
+  expect(buildMainModel({ ...base, flow, agents: jobs.slice(0, 1), now: 10_000 }, s)).toMatchObject({ isDone: false, right: '~45%' })
+  // Nothing planned: never complete.
+  expect(flowCompletion({ ...flow, total: 0 }, jobs, false).isComplete).toBe(false)
+})
+
+// ---------------------------------------------------------------------------
 // The task list, pure.
 
 const UPDATE_PLAN = 'mcp__ccd_turn__update_plan'
@@ -186,7 +273,7 @@ test('update_plan: items, advance, done/start give the expected ratio, pill and 
 
   p = planAfterCall(p ?? null, call({ advance: true }), 40)
   expect(p?.items.map(i => i.status)).toEqual(['completed', 'completed', 'completed'])
-  expect(working(p ?? null)).toMatchObject({ title: 'In lavoro', pill: 'Passo 3/3', right: '~100%', ratio: 1 })
+  expect(working(p ?? null)).toMatchObject({ title: 'In lavoro', pill: 'Passo 3/3', right: '~99%', ratio: 1 })
   expect(working(p ?? null, 'en')).toMatchObject({ title: 'Working', pill: 'Step 3/3' })
 })
 
@@ -331,7 +418,7 @@ test('update_plan calls drive the working bar and reach the tool unchanged', IT,
   expect(await mainAlt(ui)).toBe('Write the fix · Passo 2/2 · ~75%')
 
   await callTool($, { tool: UPDATE_PLAN, done: [2] })
-  expect(await mainAlt(ui)).toBe('In lavoro · Passo 2/2 · ~100%')
+  expect(await mainAlt(ui)).toBe('In lavoro · Passo 2/2 · ~99%')
 
   // Each call arrived beneath exactly as sent.
   const plans = seen.filter(e => e.tool === UPDATE_PLAN)
@@ -381,7 +468,7 @@ test('a completed list is cleared when a new turn starts; an open one carries on
   await callTool($, { tool: UPDATE_PLAN, done: [1, 2] })
   // A prompt typed over the running turn is not a new turn.
   await newTurn($, 'turn-1')
-  expect(await mainAlt(ui)).toBe('In lavoro · Passo 2/2 · ~100%')
+  expect(await mainAlt(ui)).toBe('In lavoro · Passo 2/2 · ~99%')
 
   await newTurn($)
   expect(await mainAlt(ui)).toBe('In lavoro · <1m · 0 tool')
@@ -431,4 +518,55 @@ test('the flow estimate moves with a running worker, then its finish, then its a
 
   await $.tool.call({ tool: 'mcp__progress-bar__progress', done: 1 })
   expect(await mainAlt(ui)).toBe('Demo · Attività 1/2 · 50%')
+})
+
+test('through the engine: both tasks ended and the turn idle draw the flow finished; a working turn draws the estimate', IT, async ($, on) => {
+  mock.clock(on, { now: 1_000 })
+  let n = 0
+  on('session.start', async (_, e) => ({ cwd: e.cwd }))
+  on('tool.register', async (_, e) => ({ value: { tool: `mcp__progress-bar__${e.name}` } }))
+  on('agent.spawn', async () => ({ model: 'claude-opus-5-5', agentId: `agent-${++n}` }))
+  on('turn.complete', async (_, e) => ({ text: e.answer, usage: e.usage }))
+  await start($)
+  const idle = await mountDesktop($, { isWorking: false })
+  const busy = await mountDesktop($, { isWorking: true })
+  await $.tool.call({
+    tool: 'mcp__progress-bar__progress',
+    title: 'Demo',
+    total: 2,
+    done: 0,
+    phase: 'delegate',
+    tasks: [
+      { title: 'First task', tier: 'medium' },
+      { title: 'Second task', tier: 'light', after: [1] },
+    ],
+  })
+  for (const [i, description] of ['First task', 'Second task'].entries()) {
+    await $.agent.spawn({
+      prompt: 'Do it.',
+      description,
+      subagentType: 'savvy-flow:savvy-medium',
+      tool_use_id: `toolu_${i + 1}`,
+      provider: { plugin: 'engine', tier: 'core' },
+      parentModel: 'claude-opus-5-5',
+      background: true,
+      fork: false,
+    })
+  }
+  expect(await mainAlt(idle)).toBe('Demo · Attività 0/2 · 0%')
+  for (const agentId of ['agent-1', 'agent-2'])
+    await $.turn.complete({
+      answer: 'done',
+      durationMs: 1_000,
+      isAborted: false,
+      turnId: `turn-${agentId}`,
+      agentId,
+      reason: 'answer',
+      usage: { model: 'claude-opus-5-5', input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    })
+  expect(await mainAlt(idle)).toBe('Demo · Attività 2/2 · 100%')
+  expect(String((firstSvg(await idle.drawn())?.props as { source?: unknown })?.source)).toContain('<g fill="#5fbf8f">')
+  expect(await mainAlt(busy)).toBe('Demo · Attività 0/2 · ~90%')
+  // Derived on the draw: the stored flow still says 0/2.
+  expect(await $.tool.call({ tool: 'mcp__progress-bar__progress' })).toMatchObject({ result: 'ok: Demo: delegate 0/2' })
 })

@@ -194,9 +194,16 @@ const MORE_H = 18
 // The desktop band: [left column: main bar + agents?, agent rows] [right zone:
 // divider + RAM card], the left column LEFT_SHARE of the row and the right zone
 // the rest. The desktop puts ~GAP_PX between siblings.
+//
+// The pictures are fluid: each Svg is DESIGNED at a px size estimated from
+// bodyColumns (its viewBox), carries no width/height, and is given no
+// width/height props, so the surface draws it at its slot's real width with
+// its aspect ratio kept; the slots themselves are percentages of the real
+// row. A cell is not 8px everywhere (VS Code's are narrower), so the estimate
+// only sets the design scale, never the drawn size.
 const GAP_PX = 8
 // The row width is estimated from bodyColumns; ROW_SAFETY_PX more is held back
-// so an estimate a little wide never makes the row wrap.
+// (a design margin, kept so the pictures' proportions stay as they were).
 const ROW_SAFETY_PX = 24
 const LEFT_SHARE = 0.8
 const MAIN_MIN = 40
@@ -204,10 +211,11 @@ const MAIN_MIN = 40
 type RowGeometry = { rowW: number; leftW: number; mainW: number; rightW: number; agentsPx: number }
 
 /**
- * Widths of the desktop band for `cols` body columns and an agents label of
- * `agentsLen` characters (0: none). leftW is the left column (the agent rows'
- * width), rightW the right zone (divider + RAM card); the agents estimate
- * only sizes the main bar, never the divider's x.
+ * Design widths of the desktop band for `cols` body columns and an agents
+ * label of `agentsLen` characters (0: none): the viewBox widths, not the drawn
+ * ones. leftW is the left column (the agent rows' width), rightW the right
+ * zone (divider + RAM card); the agents estimate only sizes the main bar,
+ * never the divider's x.
  */
 function desktopRowGeometry(cols: number, agentsLen: number): RowGeometry {
   const rowW = Math.max(180, Math.min(1600, cols * 8 - 96 - ROW_SAFETY_PX))
@@ -727,28 +735,34 @@ export const register: Register = (on, options) => {
       const { Svg } = ui
       const cols = e.props.bodyColumns || 100
       const g = desktopRowGeometry(cols, agentsButton ? agentsLabel.length : 0)
-      // The right zone (and its divider) spans the left column exactly: the rows' heights are fixed.
+      // The right zone (and its divider) spans the left column: its viewBox is
+      // the left column's design height. Every picture is designed at the same
+      // scale against its slot (left column pictures at leftW, the right zone at
+      // rightW, both shares of the same estimated row), so ASSUMING the real
+      // row is the estimate times some factor k, the left column and the right
+      // zone both draw k times their design height and the divider still spans
+      // the column. The main row stretches into what the agents button leaves
+      // (designed at mainW), so its own factor can differ a little: accepted.
       const totalH = MAIN_H + shown.length * AGENT_ROW_H + (moreLine ? MORE_H : 0)
       // Every source below is a pure function of what it shows (seed from the
       // turn, never the clock; whole percents; whole minutes), so a tick that
       // changes nothing visible hands back the same bytes and no image reloads.
       // Each Svg keeps its key and its place: VS Code matches them by position.
+      // No Svg gets width/height: each fills its slot (fluidSvgOpen). The rows
+      // say nowrap: a row Box wraps by default on the desktop surfaces, and
+      // 80% + gap + 20% would push the right zone under the left column.
       return (
-        <Box flexDirection="row" alignItems="flex-start" justifyContent="flex-start" width="100%" gap={1}>
-          {/* A percentage, not g.leftW: a Box's numeric width is not pixels, so 80% of the real row it is. */}
+        <Box flexDirection="row" flexWrap="nowrap" alignItems="flex-start" justifyContent="flex-start" width="100%" gap={1}>
+          {/* Percentages, not px: a Box's numeric width is not pixels, so 80% of the real row it is. */}
           <Box key="left" flexDirection="column" gap={0} flexShrink={0} width="80%">
-            <Box key="top" flexDirection="row" alignItems="center" gap={1}>
-              <Svg
-                key="main"
-                source={mainRowSvg(m, g.mainW, turnSeed(start, m), hasBranch)}
-                alt={alt}
-                width={g.mainW}
-                height={MAIN_H}
-              />
+            <Box key="top" flexDirection="row" flexWrap="nowrap" alignItems="center" width="100%" gap={1}>
+              <Box key="main-slot" flexGrow={1} flexShrink={1}>
+                <Svg key="main" source={mainRowSvg(m, g.mainW, turnSeed(start, m), hasBranch)} alt={alt} />
+              </Box>
               {agentsButton}
             </Box>
             {shown.map((r, i) => (
-              <Svg key={r.id} source={agentRowSvg(r, g.leftW, branchOf(i))} alt={rowAlt(r)} width={g.leftW} height={AGENT_ROW_H} />
+              <Svg key={r.id} source={agentRowSvg(r, g.leftW, branchOf(i))} alt={rowAlt(r)} />
             ))}
             {moreLine ? (
               <Box paddingLeft={2}>
@@ -756,13 +770,10 @@ export const register: Register = (on, options) => {
               </Box>
             ) : null}
           </Box>
-          <Svg
-            key="ram"
-            source={rightZoneSvg(ramInfo, ramErr, g.rightW, totalH)}
-            alt={ramAlt}
-            width={g.rightW}
-            height={totalH}
-          />
+          {/* 20% of the row, giving up the gap (it may shrink): the divider and the RAM card. */}
+          <Box key="right" flexShrink={1} width="20%">
+            <Svg key="ram" source={rightZoneSvg(ramInfo, ramErr, g.rightW, totalH)} alt={ramAlt} />
+          </Box>
         </Box>
       )
     }

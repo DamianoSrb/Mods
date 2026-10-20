@@ -1,9 +1,23 @@
 // One row per agent under the main row: one SVG on the desktop, one line on the terminal.
 // savvy-progress's agents-pane colors: the tier colors the running dot and the
-// bar, a green check / red cross marks the end, the context fallback is grey.
+// bar (the accent for a non-savvy agent), a running row's context fallback is
+// grey; a finished row's bar is full green, a failed one's red, with a green
+// check / red cross at the start.
 import type { AgentRowModel } from './model'
 import { BRANCH_COLOR, BRANCH_OPACITY, BRANCH_W, DOT_X } from './main-row'
-import { FONT, colorOf, fitText, savvyClasses, textWidth, wholePercent, xml, type TerminalUi } from './shared'
+import {
+  ACCENT,
+  DONE,
+  FONT,
+  colorOf,
+  fitText,
+  fluidSvgOpen,
+  savvyClasses,
+  textWidth,
+  wholePercent,
+  xml,
+  type TerminalUi,
+} from './shared'
 
 /** Where a row hangs on the tree: 'mid' (├─, the trunk goes on) or 'last' (└─). */
 export type Branch = 'mid' | 'last'
@@ -50,6 +64,17 @@ const statusMark = (status: AgentRowModel['status'], color: string): string => {
 
 const clamp01 = (n: number): number => (Number.isFinite(n) ? Math.max(0, Math.min(1, n)) : 0)
 
+/**
+ * The bar's color (and the running dot's): green once done and red once
+ * failed, whatever the tier; while running the tier's, the accent for a
+ * non-savvy agent (its tier `other`). Desktop and terminal alike.
+ */
+const barColor = (r: AgentRowModel): string =>
+  r.status === 'done' ? DONE : r.status === 'failed' ? KO : r.tier === 'other' ? ACCENT : colorOf(r.tier)
+
+/** Only a running row's context fallback is drawn grey; a finished row takes its status color. */
+const isGreyBar = (r: AgentRowModel): boolean => r.isContext && r.status === 'running'
+
 const rightText = (r: AgentRowModel): string => `${r.stat} · ${r.tokens} tok · ${r.time}`
 
 const ELBOW_COLOR: Record<AgentRowModel['status'], string> = { running: BRANCH_COLOR, done: '#5fbf8f', failed: KO }
@@ -72,14 +97,16 @@ const branchSvg = (branch: Branch, status: AgentRowModel['status']): string => {
 }
 
 /**
- * One agent row, `width` × AGENT_ROW_H; the right text ends 4px short of the
- * row's right edge. On the desktop the rows sit in the column left of the divider.
- * A pure function of the row model: a running row's time comes in whole
- * minutes there (buildAgentRows' timeStyle), so a redraw keeps the same source.
+ * One agent row, designed at `width` × AGENT_ROW_H (a viewBox only: the
+ * surface scales it to the column's real width); the right text ends 4px
+ * short of the row's right edge. On the desktop the rows sit in the column
+ * left of the divider. A pure function of the row model: a running row's time
+ * comes in whole minutes there (buildAgentRows' timeStyle), so a redraw keeps
+ * the same source.
  */
 export function agentRowSvg(r: AgentRowModel, width: number, branch: Branch = 'last'): string {
   const W = Math.max(INDENT + 40, Math.round(width))
-  const color = colorOf(r.tier)
+  const color = barColor(r)
   const right = rightText(r)
   const rightW = Math.ceil(Math.max(RIGHT_MIN, textWidth(right, 11)))
   const rightX = W - 4
@@ -92,8 +119,8 @@ export function agentRowSvg(r: AgentRowModel, width: number, branch: Branch = 'l
   const fillW = Math.round(barW * wholePercent(r.progress))
   const barY = MID_Y - BAR_H / 2
   const title = titleSlot > 12 ? fitText(r.title, 12, titleSlot) : ''
-  // Without reported steps the bar falls back to the context, drawn grey.
-  const fillPaint = r.isContext ? 'class="pba-m"' : `fill="${color}"`
+  // Without reported steps a running bar falls back to the context, drawn grey.
+  const fillPaint = isGreyBar(r) ? 'class="pba-m"' : `fill="${color}"`
   const fill = fillW > 0 ? `<rect ${fillPaint} x="${barX}" y="${barY}" width="${fillW}" height="${BAR_H}" rx="2"/>` : ''
   const body =
     branchSvg(branch, r.status) +
@@ -103,7 +130,7 @@ export function agentRowSvg(r: AgentRowModel, width: number, branch: Branch = 'l
       : '') +
     (barW > 0 ? `<rect class="pba-k" x="${barX}" y="${barY}" width="${barW}" height="${BAR_H}" rx="2"/>${fill}` : '') +
     `<text class="pba-s" x="${rightX}" y="${TEXT_Y}" text-anchor="end" font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums" style="font-variant-numeric:tabular-nums">${xml(right)}</text>`
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${AGENT_ROW_H}" viewBox="0 0 ${W} ${AGENT_ROW_H}">${rowCss(r.status === 'running')}${body}</svg>`
+  return `${fluidSvgOpen(W, AGENT_ROW_H)}${rowCss(r.status === 'running')}${body}</svg>`
 }
 
 const GLYPH: Record<AgentRowModel['status'], string> = { running: '●', done: '✓', failed: '✗' }
@@ -116,7 +143,7 @@ const cut = (s: string, max: number): string => {
 
 export function agentRowTerminal(ui: TerminalUi, r: AgentRowModel, cols: number, branch: Branch = 'last'): JSX.Element {
   const { Text } = ui
-  const color = colorOf(r.tier)
+  const color = barColor(r)
   const glyphColor = r.status === 'failed' ? 'red' : r.status === 'done' ? 'green' : color
   const right = rightText(r)
   // Fixed title and bar widths, so the bars line up from row to row.
@@ -129,7 +156,7 @@ export function agentRowTerminal(ui: TerminalUi, r: AgentRowModel, cols: number,
     <Text wrap="truncate-end">
       <Text dimColor>{branch === 'mid' ? '├─ ' : '└─ '}</Text>
       <Text color={glyphColor}>{GLYPH[r.status]}</Text> {title}{' '}
-      {r.isContext ? <Text dimColor>{bar}</Text> : <Text color={color}>{bar}</Text>} <Text dimColor>{right}</Text>
+      {isGreyBar(r) ? <Text dimColor>{bar}</Text> : <Text color={color}>{bar}</Text>} <Text dimColor>{right}</Text>
     </Text>
   )
 }

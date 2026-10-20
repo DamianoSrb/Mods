@@ -24,13 +24,14 @@ export type MainModel = {
   title: string
   /**
    * 0..1 fill. flow: the estimate (accepted tasks plus the share of the
-   * unaccepted tasks' runs, in [acceptedRatio, 0.99]; 1 if finished);
-   * working with a plan: (completed + ½ in progress) / items; 0 otherwise.
+   * unaccepted tasks' runs, in [acceptedRatio, 0.99]; 1 if finished or
+   * completed by its runs, see flowCompletion); working with a plan:
+   * (completed + ½ in progress) / items; 0 otherwise.
    */
   ratio: number
   /**
    * 0..1 confirmed part, never above ratio. flow: done/total (1 if
-   * finished); working with a plan: completed / items; 0 otherwise.
+   * finished or completed); working with a plan: completed / items; 0 otherwise.
    */
   acceptedRatio: number
   /** True when ratio is an estimate: flow with ratio > acceptedRatio; working with a plan always. */
@@ -40,18 +41,20 @@ export type MainModel = {
   /** flow total (tick marks), 0 otherwise */
   ticks: number
   /**
-   * flow: phase label; working: "Passo k/n" with a plan, else the elapsed
+   * flow: phase label ("Attività s/n" once completed by its runs, s the tasks
+   * whose run succeeded); working: "Passo k/n" with a plan, else the elapsed
    * time (m:ss, or "<1m"/"3m" with timeStyle 'minutes'); idle: '' (the title says it)
    */
   pill: string
   /**
-   * flow: "NN%", "~NN%" when estimated; working: "~NN%" with a plan, else
-   * "N tool"; idle: "[✓ <flow> · ]ultimo turno m:ss · N tool", or "" before any turn
+   * flow: "NN%", "~NN%" when estimated (at most "~99%"); working: "~NN%" with
+   * a plan, else "N tool"; idle: "[✓ <flow> · ]ultimo turno m:ss · N tool", or
+   * "" before any turn
    */
   right: string
-  /** idle after a finished flow */
+  /** A finished flow: idle after one, or (mode flow) one completed by its runs (flowCompletion). */
   isDone: boolean
-  /** flow: round(ratio*100); idle with isDone: 100; otherwise null */
+  /** flow: round(ratio*100) (100 once completed); idle with isDone: 100; otherwise null */
   ringPercent: number | null
   /** true only in working mode */
   isAnimating: boolean
@@ -66,7 +69,7 @@ export type AgentRowModel = {
   status: 'running' | 'done' | 'failed'
   /** 0..1: done → 1; stepTotal → stepDone/stepTotal; else contextTokens/contextMax */
   progress: number
-  /** true when progress is the context fallback (drawn grey) */
+  /** true when progress is the context fallback (drawn grey while running) */
   isContext: boolean
   /** "3/5" or "ctx 12%" */
   stat: string
@@ -90,9 +93,14 @@ const phaseLabel = (f: Flow, s: Strings): string => {
   return f.total ? `${name} ${f.done}/${f.total}` : name
 }
 
-/** A percentage, with a leading `~` when it is an estimate: "45%", "~45%". */
-export const percentText = (ratio: number, isEstimate: boolean): string =>
-  `${isEstimate ? '~' : ''}${Math.round(clamp01(ratio) * 100)}%`
+/**
+ * A percentage, with a leading `~` when it is an estimate: "45%", "~45%". An
+ * estimate never reads 100: it stops at "~99%".
+ */
+export const percentText = (ratio: number, isEstimate: boolean): string => {
+  const pct = Math.round(clamp01(ratio) * 100)
+  return isEstimate ? `~${Math.min(99, pct)}%` : `${pct}%`
+}
 
 // ---------------------------------------------------------------------------
 // The flow estimate: accepted tasks count whole, a planned task not yet
@@ -129,21 +137,31 @@ export function runShare(a: AgentRun, now: number): number {
  * any). A retried task counts by its latest run. The `done` accepted tasks
  * are taken to be the earliest finished runs, so those are left out.
  */
-function unacceptedShares(f: Flow, agents: readonly AgentRun[], now: number): number[] {
-  const open = Math.max(0, f.total - f.done)
-  if (!open) return []
-  const titles = new Set(f.tasks.map(t => normTitle(t.title)).filter(Boolean))
-  const matched = agents.filter(a => titles.has(normTitle(a.description)))
-  const workers = agents.filter(a => tierOf(a.type) !== 'other')
-  const pool = matched.length ? matched : workers.length ? workers : agents
-
+/** Each task's latest run, keyed by its normalized description (a run without one stands alone). */
+function latestRuns(pool: readonly AgentRun[]): Map<string, AgentRun> {
   const latest = new Map<string, AgentRun>()
   for (const a of pool) {
     const key = normTitle(a.description) || `#${a.id}`
     const prev = latest.get(key)
     if (!prev || a.startedAt >= prev.startedAt) latest.set(key, a)
   }
-  const runs = [...latest.values()]
+  return latest
+}
+
+/** The savvy workers' runs when there are any, else every run: the runs that stand for tasks without titles. */
+const workerPool = (agents: readonly AgentRun[]): readonly AgentRun[] => {
+  const workers = agents.filter(a => tierOf(a.type) !== 'other')
+  return workers.length ? workers : agents
+}
+
+function unacceptedShares(f: Flow, agents: readonly AgentRun[], now: number): number[] {
+  const open = Math.max(0, f.total - f.done)
+  if (!open) return []
+  const titles = new Set(f.tasks.map(t => normTitle(t.title)).filter(Boolean))
+  const matched = agents.filter(a => titles.has(normTitle(a.description)))
+  const pool = matched.length ? matched : workerPool(agents)
+
+  const runs = [...latestRuns(pool).values()]
   const accepted = new Set(
     runs
       .filter(a => a.status === 'done')
@@ -170,6 +188,43 @@ export function flowEstimate(f: Flow, agents: readonly AgentRun[], now: number):
   const sum = unacceptedShares(f, agents, now).reduce((n, x) => n + x, 0)
   const estimate = clamp01((Math.min(f.done, f.total) + sum) / f.total)
   return { ratio: Math.max(acceptedRatio, Math.min(ESTIMATE_CAP, estimate)), acceptedRatio }
+}
+
+/**
+ * Whether a flow's planned work is over though no `done`/`finished` report
+ * said so: every planned task has a run that ended (each of `f.tasks` by its
+ * title, its latest run; without titles, `f.total` runs, the savvy workers'
+ * when there are any), no agent runs, and the main turn is not working. A
+ * failed run counts as ended. `planned`: the tasks (titles, else total);
+ * `succeeded`: those whose run ended done, never below the reported `done`.
+ * Derived on every draw: the stored flow is never changed.
+ */
+export function flowCompletion(
+  f: Flow,
+  agents: readonly AgentRun[],
+  isWorking: boolean,
+): { isComplete: boolean; planned: number; succeeded: number } {
+  const titles = f.tasks.map(t => normTitle(t.title)).filter(Boolean)
+  const planned = titles.length || Math.max(0, Math.floor(Number.isFinite(f.total) ? f.total : 0))
+  const accepted = Math.min(planned, Math.max(0, Number.isFinite(f.done) ? Math.floor(f.done) : 0))
+  const no = { isComplete: false, planned, succeeded: accepted }
+  if (isWorking || planned === 0 || agents.some(a => a.status === 'running')) return no
+
+  let ended: AgentRun[] = []
+  if (titles.length) {
+    const wanted = new Set(titles)
+    const latest = latestRuns(agents.filter(a => wanted.has(normTitle(a.description))))
+    const runs = titles.map(t => latest.get(t))
+    if (runs.every(Boolean)) ended = runs as AgentRun[]
+  }
+  // No titles, or titles the Agent descriptions did not repeat: count the worker runs instead.
+  if (!ended.length) {
+    ended = [...latestRuns(workerPool(agents)).values()]
+    if (ended.length < planned) return no
+  }
+  // Nothing runs (checked above): every run left here ended, done or failed.
+  const ok = Math.min(planned, ended.filter(a => a.status === 'done').length)
+  return { isComplete: true, planned, succeeded: Math.max(accepted, ok) }
 }
 
 // ---------------------------------------------------------------------------
@@ -282,6 +337,25 @@ export function buildMainModel(
   const { flow, isWorking, startedAt, endedAt, tools, now } = input
 
   if (flow && !flow.isFinished) {
+    // Every planned task's run ended and all is quiet: drawn finished (green,
+    // 100%), the stored flow left as it is.
+    const end = flowCompletion(flow, input.agents ?? [], isWorking)
+    if (end.isComplete) {
+      return {
+        mode: 'flow',
+        title: flow.title,
+        ratio: 1,
+        acceptedRatio: 1,
+        isEstimate: false,
+        runRatio: 1,
+        ticks: Math.max(0, flow.total),
+        pill: `${s.tasks} ${end.succeeded}/${end.planned}`,
+        right: percentText(1, false),
+        isAnimating: false,
+        isDone: true,
+        ringPercent: 100,
+      }
+    }
     const { ratio, acceptedRatio } = flowEstimate(flow, input.agents ?? [], now)
     const isEstimate = ratio > acceptedRatio
     return {

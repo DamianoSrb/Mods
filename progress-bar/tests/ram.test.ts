@@ -167,7 +167,9 @@ test('right zone: one <svg>, the card inlined in a translated group', () => {
     const svg = rightZoneSvg(reading, err, 180, 66)
     expect(svg.match(/<svg/g)?.length).toBe(1)
     expect(svg.match(/<\/svg>/g)?.length).toBe(1)
-    expect(svg.startsWith('<svg xmlns="http://www.w3.org/2000/svg" width="180" height="66"')).toBe(true)
+    // Fluid: designed at 180 × 66 (a viewBox), no width/height on the root.
+    expect(svg.startsWith('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 66" preserveAspectRatio="xMinYMin meet"')).toBe(true)
+    expect(svg.match(/^<svg[^>]*>/)?.[0]).not.toMatch(/\s(width|height)=/)
     expect(svg.endsWith('</g></svg>')).toBe(true)
     // Both styles at the root, before any drawing.
     expect(svg.match(/<style>/g)?.length).toBe(2)
