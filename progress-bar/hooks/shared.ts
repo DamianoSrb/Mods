@@ -125,13 +125,23 @@ export const xml = (s: string): string =>
   s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c] ?? c)
 
 /**
- * The opening tag of a band picture designed at `w` × `h`: a viewBox and no
- * width/height, so a surface drawing the Svg without width/height props fills
- * the slot's real width and keeps the aspect ratio (the height follows), the
- * drawing scaled uniformly from its top-left corner. `attrs` go on the root too.
+ * The opening tag of a band picture `h` CSS px tall and as wide as its slot:
+ * `width="100%"`, a px height and no viewBox, so one user unit is one CSS
+ * pixel at any drawn width. Text and the fixed marks keep their design size
+ * (px); only what is placed in percentages (a bar's span, `x="100%"`)
+ * follows the real width. The Svg element gets `height={h}` and no width:
+ * VS Code draws it as an <img> `h` px tall that a column Box stretches to its
+ * width (a row Box would leave it 300px wide), and draws the markup at that
+ * box's size, one unit to the pixel. `attrs` go on the root too.
  */
-export const fluidSvgOpen = (w: number, h: number, attrs = ''): string =>
-  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" preserveAspectRatio="xMinYMin meet"${attrs}>`
+export const pxSvgOpen = (h: number, attrs = ''): string =>
+  `<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="${h}"${attrs}>`
+
+/** Two decimals, no trailing zeros. */
+const dec2 = (n: number): string => String(Math.round(n * 100) / 100)
+
+/** A share (0..1) as a short percentage: `0.1733` → `17.33%`. */
+export const pct = (share: number): string => `${dec2((Number.isFinite(share) ? share : 0) * 100)}%`
 
 // Rough advance of system UI text, in em; good enough to size a slot.
 const charEm = (ch: string): number =>

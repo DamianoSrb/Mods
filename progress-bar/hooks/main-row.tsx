@@ -16,6 +16,18 @@
 // visible must hand back the same bytes. The CSS animations run on their own
 // inside the picture. The title and the right text sit in fixed slots, so the
 // bar width depends only on the row width.
+//
+// Drawn at its real width, in CSS px (pxSvgOpen: no root viewBox): the dot,
+// the title, the pill, the right text and the cap keep their design pixel
+// size. The geometry is designed at the estimated row width `W`; the bar's
+// span is placed in percentages of the real width (L% to L+BW%, as at `W`),
+// so a wider row draws a longer bar. Its insides (dithered cells, comets,
+// shimmer, ticks, sparks across the field) are designed at the estimated bar
+// width (BAR_W) in a nested <svg> stretched over the span, horizontally only
+// (preserveAspectRatio="none"): no text goes in there. The track and its
+// round clip are px-rounded rects in percentages; the pill, the cap and the
+// sparks at the fill head sit in nested <svg>s placed at the head in
+// percent, drawn in px around it (anchored).
 // No `$` here.
 import type { MainModel } from './model'
 import {
@@ -24,9 +36,10 @@ import {
   FONT,
   IDLE,
   fitText,
-  fluidSvgOpen,
   mulberry32,
   noise,
+  pct,
+  pxSvgOpen,
   savvyClasses,
   strHash,
   textWidth,
@@ -165,8 +178,19 @@ const twinkleCss = (cls: string, look: Look, rnd: Rand, lo: number, hi: number):
 /** Sparse at the start, dense toward the head. */
 const ramp = (cols: number) => (c: number): number => 0.35 + 0.6 * Math.pow(c / Math.max(1, cols), 1.2)
 
-/** Bright 2×2 cells near `headX` (in [lo, headX]), fading in and out at random. */
-const sparks = (rnd: Rand, lo: number, headX: number, idx: { n: number }, count = 3 + Math.floor(rnd() * 4)): { svg: string; css: string } => {
+/**
+ * Bright 2×2 cells near `headX` (in [lo, headX], design units along the bar),
+ * fading in and out at random. Their x is written less `origin`: 0 inside the
+ * stretched insides, the anchor's design x when drawn in px around it.
+ */
+const sparks = (
+  rnd: Rand,
+  lo: number,
+  headX: number,
+  idx: { n: number },
+  count = 3 + Math.floor(rnd() * 4),
+  origin = 0,
+): { svg: string; css: string } => {
   let svg = ''
   let css = ''
   const cLo = Math.max(0, Math.floor(lo / CELL))
@@ -177,7 +201,7 @@ const sparks = (rnd: Rand, lo: number, headX: number, idx: { n: number }, count 
     const per = rnd() < 0.5 ? 0.5 : 1
     const n = idx.n++
     const fill = rnd() < 0.6 ? '#ffffff' : '#e8e6ff'
-    svg += `<rect class="pbm-sp${n} pbm-an" x="${c * CELL + 1}" y="${f2(CELL_Y0 + r * CELL)}" width="2" height="2" fill="${fill}"/>`
+    svg += `<rect class="pbm-sp${n} pbm-an" x="${f2(c * CELL + 1 - origin)}" y="${f2(CELL_Y0 + r * CELL)}" width="2" height="2" fill="${fill}"/>`
     css += `.pbm-sp${n}{animation:pbm-spk ${per}s ease-in-out ${f2(-rnd() * per)}s infinite}`
   }
   return { svg, css }
@@ -246,8 +270,10 @@ const REDUCED = '@media (prefers-reduced-motion: reduce){.pbm-an{animation:none!
 const dotColor = (m: MainModel): string => (m.isDone ? DONE : m.mode === 'idle' ? IDLE : ACCENT)
 
 /**
- * Fixed geometry for a row `width` px wide: the bar width depends only on
- * `width`, never on the texts.
+ * Fixed geometry for a row designed `width` px wide (the estimate): the bar
+ * width depends only on `width`, never on the texts. Drawn wider or narrower,
+ * the bar keeps its share of the row (barX/W to (barX+barW)/W); the title
+ * slot and the right slot keep their px.
  */
 export const mainRowGeometry = (width: number): { W: number; titleSlot: number; barX: number; barW: number } => {
   const W = Math.max(1, Math.round(Number.isFinite(width) ? width : 180))
@@ -267,10 +293,10 @@ export const turnSeed = (startedAt: number | null, m: Pick<MainModel, 'mode' | '
   strHash(`${startedAt ?? 0}|${m.mode}|${m.isDone ? 'done' : ''}`)
 
 /**
- * The row's SVG, designed at `width` × MAIN_H: a viewBox only, so the surface
- * scales it to the slot's real width (fluidSvgOpen). With `hasBranch` (agent rows shown below)
- * a trunk runs from just below the dot down to the row's bottom edge. The
- * same model, width and seed always give the same string.
+ * The row's SVG, MAIN_H px tall and as wide as its slot (pxSvgOpen), its
+ * geometry designed at `width` (see the file's head). With `hasBranch` (agent
+ * rows shown below) a trunk runs from just below the dot down to the row's
+ * bottom edge. The same model, width and seed always give the same string.
  */
 export function mainRowSvg(m: MainModel, width: number, seed = 0, hasBranch = false): string {
   const { W, titleSlot, barX: BAR_X, barW: BAR_W } = mainRowGeometry(width)
@@ -289,21 +315,30 @@ export function mainRowSvg(m: MainModel, width: number, seed = 0, hasBranch = fa
   const pillText = m.pill && m.mode !== 'idle' && pillRoom >= 12 ? fitText(m.pill, PILL_SIZE, pillRoom / 1.08) : ''
   const pillW = pillText ? Math.min(BAR_W, Math.round(16 + textWidth(pillText, PILL_SIZE) * 1.08)) : 0
 
+  // The stretched insides (design units along the bar: defs, body), what is
+  // drawn in px at the fill head (head, at design x headAt) and the pill (in
+  // px at design x pillAt, from dx px off it).
   let defs = ''
   let body = ''
+  let head = ''
+  let headAt = 0
   let pill = ''
+  let pillAt = 0
   let css = ''
   const spIdx = { n: 0 }
 
-  const pillSvg = (x: number, color: string): string =>
-    `<rect x="${x}" width="${pillW}" height="${BAR_H}" rx="${BAR_R}" fill="${color}"/>` +
-    `<text x="${f2(x + pillW / 2)}" y="${f2(BAR_H / 2 + 3.6)}" text-anchor="middle" font-family="${FONT}" font-size="${PILL_SIZE}" font-weight="600" fill="#ffffff">${xml(pillText)}</text>`
+  const pillSvg = (dx: number, color: string): string =>
+    `<rect x="${dx}" width="${pillW}" height="${BAR_H}" rx="${BAR_R}" fill="${color}"/>` +
+    `<text x="${f2(dx + pillW / 2)}" y="${f2(BAR_H / 2 + 3.6)}" text-anchor="middle" font-family="${FONT}" font-size="${PILL_SIZE}" font-weight="600" fill="#ffffff">${xml(pillText)}</text>`
 
   if (m.mode === 'flow' && !m.isDone) {
     // Whole percent, as the right text rounds it: an estimate's drift (the
     // time curve of a running worker) moves nothing until its percentage does.
     const ratio = wholePercent(m.ratio)
     const fillW = Math.round(BAR_W * ratio)
+    // The pill ends at the fill head, or starts at the bar's left while the
+    // fill is shorter than the pill; the cap and sparks keep beside it.
+    pillAt = pillText && fillW >= pillW ? fillW : 0
     const runW = Math.round(BAR_W * Math.max(ratio, wholePercent(m.runRatio)))
     const cols = Math.floor(fillW / CELL)
     const runCols = Math.floor(runW / CELL)
@@ -349,10 +384,12 @@ export function mainRowSvg(m: MainModel, width: number, seed = 0, hasBranch = fa
       const cm = comet(0, clamp(fillW * (0.3 + rnd() * 0.2), 12, BAR_W * 0.28), fillW, rnd() < 0.5 ? 0.5 : 1, rnd, look, 'pbm-cg', '#378ADD')
       body += `<g clip-path="url(#pbm-fclip)">${sh}${cm.svg}</g>`
       css += cm.css + PULSE_KF
-      // Sparks near the fill head (left of the pill), and a pulsing cap on it.
+      // Sparks near the fill head (left of the pill), and a pulsing cap on it:
+      // in px around the pill's anchor (the head itself with no pill).
       const headX = pillText ? Math.max(CELL * 2, fillW - pillW) : fillW
-      const sp = sparks(rnd, headX - 48, headX, spIdx)
-      body += sp.svg + cap(headX)
+      headAt = pillText ? pillAt : fillW
+      const sp = sparks(rnd, headX - 48, headX, spIdx, 3 + Math.floor(rnd() * 4), headAt)
+      head = sp.svg + cap(headX - headAt)
       css += sp.css + SPARK_KF + CAP_CSS
     }
     // Tick marks between tasks, only past the fill, only when they fit.
@@ -367,7 +404,7 @@ export function mainRowSvg(m: MainModel, width: number, seed = 0, hasBranch = fa
     }
     if (pillText) {
       const pillX = Math.max(0, Math.min(BAR_W - pillW, fillW - pillW))
-      pill = pillSvg(pillX, colorAt(FLOW_STOPS, (pillX + pillW / 2) / BAR_W))
+      pill = pillSvg(pillX - pillAt, colorAt(FLOW_STOPS, (pillX + pillW / 2) / BAR_W))
     }
   } else if (m.mode === 'working') {
     // The whole track is alive. A repeating violet → pink → amber gradient,
@@ -426,9 +463,10 @@ export function mainRowSvg(m: MainModel, width: number, seed = 0, hasBranch = fa
         `@keyframes pbm-sh0k{from{transform:translateX(0px)}to{transform:translateX(${fillW + w}px)}}` +
         cm.css +
         CAP_CSS
-      // Sparks just ahead of the head, then the cap on it.
-      const sp = sparks(rnd, fillW + CELL, Math.min(BAR_W, fillW + 36), spIdx, 3 + Math.floor(rnd() * 3))
-      body += sp.svg + cap(fillW)
+      // Sparks just ahead of the head, then the cap on it, in px around the head.
+      headAt = fillW
+      const sp = sparks(rnd, fillW + CELL, Math.min(BAR_W, fillW + 36), spIdx, 3 + Math.floor(rnd() * 3), headAt)
+      head = sp.svg + cap(0)
       css += sp.css
     }
     if (pillText) pill = pillSvg(0, ACCENT)
@@ -442,26 +480,40 @@ export function mainRowSvg(m: MainModel, width: number, seed = 0, hasBranch = fa
       css += `.pbm-g${i}{animation:pbm-glow 4s ease-in-out ${f2(-rnd() * 4)}s infinite}`
     }
     css += '@keyframes pbm-glow{0%,100%{opacity:1}50%{opacity:.82}}'
-    if (m.mode === 'flow' && pillText) pill = pillSvg(Math.max(0, BAR_W - pillW), DONE)
+    if (m.mode === 'flow' && pillText) {
+      pillAt = BAR_W
+      pill = pillSvg(-pillW, DONE)
+    }
   }
 
   const textY = f2(H / 2 + TITLE_SIZE * 0.36)
   const rightY = f2(H / 2 + RIGHT_SIZE * 0.36)
+  // Ends 1px short of the real right edge.
   const rightText = right
-    ? `<text class="pbm-m" x="${W - 1}" y="${rightY}" text-anchor="end" font-family="${FONT}" font-size="${RIGHT_SIZE}" font-variant-numeric="tabular-nums" style="font-variant-numeric:tabular-nums">${xml(right)}</text>`
+    ? `<text class="pbm-m" x="100%" y="${rightY}" transform="translate(-1,0)" text-anchor="end" font-family="${FONT}" font-size="${RIGHT_SIZE}" font-variant-numeric="tabular-nums" style="font-variant-numeric:tabular-nums">${xml(right)}</text>`
     : ''
 
-  return `${fluidSvgOpen(W, H)}
+  // The bar's span in percentages of the real width, as designed at W; a
+  // design x along the bar (0..BAR_W) lands at pct((BAR_X + x) / W).
+  const span = `x="${pct(BAR_X / W)}" y="${y0}" width="${pct(BAR_W / W)}" height="${BAR_H}"`
+  // A zero-width viewport at design x `at` along the bar: its content is
+  // drawn in px around it, unscaled.
+  const anchored = (at: number, inner: string): string =>
+    inner ? `<svg x="${pct((BAR_X + at) / W)}" y="${y0}" width="1" height="${BAR_H}" overflow="visible">${inner}</svg>` : ''
+  // The insides, stretched over the span horizontally only: never any text.
+  const insides = body
+    ? `<svg ${span} viewBox="0 0 ${BAR_W} ${BAR_H}" preserveAspectRatio="none">${defs ? `<defs>${defs}</defs>` : ''}${body}</svg>`
+    : ''
+  const clipped = insides || head ? `\n<g clip-path="url(#pbm-clip)">${insides}${anchored(headAt, head)}</g>` : ''
+
+  return `${pxSvgOpen(H)}
 <style>${savvyClasses('pbm')}${css}${REDUCED}</style>
-<defs><clipPath id="pbm-clip"><rect x="0" y="0" width="${BAR_W}" height="${BAR_H}" rx="${BAR_R}"/></clipPath>${defs}</defs>
+<defs><clipPath id="pbm-clip"><rect ${span} rx="${BAR_R}"/></clipPath></defs>
 <circle cx="${DOT_X}" cy="${H / 2}" r="${DOT_R}" fill="${dotColor(m)}"/>
 ${hasBranch ? `<path class="pbm-br" d="M${DOT_X} ${H / 2 + DOT_R + 2}V${H}" fill="none" stroke="${BRANCH_COLOR}" stroke-opacity="${BRANCH_OPACITY}" stroke-width="${BRANCH_W}" stroke-linecap="round"/>` : ''}
 <text class="pbm-t" x="${TITLE_X}" y="${textY}" font-family="${FONT}" font-size="${TITLE_SIZE}" font-weight="600">${xml(title)}</text>
-<g transform="translate(${BAR_X},${y0})">
-<rect class="pbm-k" width="${BAR_W}" height="${BAR_H}" rx="${BAR_R}"/>
-<g clip-path="url(#pbm-clip)">${body}</g>
-${pill}
-</g>
+<rect class="pbm-k" ${span} rx="${BAR_R}"/>${clipped}
+${anchored(pillAt, pill)}
 ${rightText}
 </svg>`
 }

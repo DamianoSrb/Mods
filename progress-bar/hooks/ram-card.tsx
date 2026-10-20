@@ -2,7 +2,7 @@
 // line on the terminal. savvy-progress look (track card, muted label, load
 // colored mini bar, tabular figures). No `$` here.
 import { fmtRamPair, ramColor, ramRatio, type RamInfo } from './ram'
-import { fitText, fluidSvgOpen, textWidth, xml, type TerminalUi } from './shared'
+import { fitText, pxSvgOpen, textWidth, xml, type TerminalUi } from './shared'
 
 export const RAM_CARD_W = 128
 export const RAM_CARD_H = 30
@@ -134,29 +134,32 @@ const ZONE_LEFT = 8
 const ZONE_CARD_MAX = 160
 
 /**
- * The desktop band's right zone, designed at `width` × `height` (a viewBox
- * only: the surface scales it to the zone's real width, the height following):
- * a 1px divider down its left edge (the whole band tall) and the RAM card,
- * centered in the area right of the divider and top-aligned with the main bar
- * (RAM_CARD_H tall).
+ * The desktop band's right zone, `height` px tall and as wide as its slot
+ * (pxSvgOpen): a 1px divider down its left edge (the whole band tall) and
+ * the RAM card, top-aligned with the main bar (RAM_CARD_H tall) and centered
+ * in the area right of the divider at the zone's real width. The card keeps
+ * its px: its width is designed at `width` (the estimated zone), its center
+ * sits at 50% of the real width plus half the divider's area (a zero-width
+ * <svg> at 50%, the card drawn around it).
  *
- * One <svg> only: the card's elements sit in a translated <g>, its style at
- * the root (a nested <svg> is not drawn by every surface).
+ * Styles at the root; the card's elements in a translated <g>.
  */
 export function rightZoneSvg(r: RamInfo | null, error: string | null, width: number, height: number): string {
   const w = Math.max(ZONE_LEFT + 24, Math.round(width))
   const h = Math.max(RAM_CARD_H, Math.round(height))
   const area = w - ZONE_LEFT
   const cardW = Math.max(24, Math.min(ZONE_CARD_MAX, area - 8))
-  const cardX = ZONE_LEFT + Math.round((area - cardW) / 2)
+  // The area's middle is ZONE_LEFT / 2 right of the zone's: the card's left edge off 50%.
+  const cardDx = Math.round(ZONE_LEFT / 2 - cardW / 2)
   return (
-    fluidSvgOpen(w, h, ` role="img" aria-label="${xml(ramAltText(r, error))}"`) +
+    pxSvgOpen(h, ` role="img" aria-label="${xml(ramAltText(r, error))}"`) +
     ZONE_STYLE +
     STYLE +
     `<line id="pbz-line" class="pbz-l" x1="0.5" y1="2" x2="0.5" y2="${h - 2}" stroke-width="1"/>` +
-    `<g id="pbz-card" transform="translate(${cardX},0)">` +
+    `<svg x="50%" y="0" width="1" height="${RAM_CARD_H}" overflow="visible">` +
+    `<g id="pbz-card" transform="translate(${cardDx},0)">` +
     ramCardBody(r, cardW, RAM_CARD_H, false, error) +
-    '</g>' +
+    '</g></svg>' +
     '</svg>'
   )
 }

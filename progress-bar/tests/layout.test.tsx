@@ -1,6 +1,8 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock, Mounted } from 'claude-code/testing'
 import type { On } from 'claude-code'
+import { mainRowGeometry } from '../hooks/main-row'
+import { pct, textWidth } from '../hooks/shared'
 
 const SURFACES = ['terminal', 'desktop'] as const
 type Surface = (typeof SURFACES)[number]
@@ -16,8 +18,9 @@ const PROPS = {
   view: {},
 }
 
-// The desktop's row geometry, as register.tsx estimates it: the pictures'
-// design sizes (viewBoxes), never their drawn sizes (they fill their slots).
+// The desktop's row geometry, as register.tsx estimates it: the widths the
+// pictures' geometry is designed at, never their drawn widths (they fill
+// their slots, px tall, the bars in percentages of the real width).
 const GAP_PX = 8
 // 24px of safety under the bodyColumns estimate, so the row never wraps.
 const rowWOf = (cols: number): number => Math.max(180, Math.min(1600, cols * 8 - 96 - 24))
@@ -74,6 +77,7 @@ type Node = {
     flexGrow?: unknown
     flexShrink?: unknown
     flexWrap?: unknown
+    flexDirection?: unknown
   }
   children?: unknown[]
 }
@@ -97,22 +101,38 @@ const desktopParts = (tree: unknown): Node[] => {
 }
 // The root <svg …> tag of a picture.
 const rootTag = (n: Node | undefined): string => String(n?.props?.source ?? '').match(/^<svg[^>]*>/)?.[0] ?? ''
-// A picture's design size, from its viewBox.
-const viewBoxOf = (n: Node | undefined): [number, number] => {
-  const m = rootTag(n).match(/\sviewBox="0 0 (\d+(?:\.\d+)?) (\d+(?:\.\d+)?)"/)
-  return [Number(m?.[1] ?? NaN), Number(m?.[2] ?? NaN)]
-}
-const widthOf = (n: Node | undefined): number => viewBoxOf(n)[0]
-// Fluid: a viewBox of `w` × `h`, no width/height on the root, none on the Svg element either.
-function expectFluid(n: Node | undefined, w: number, h: number): void {
+// As wide as its slot and `h` px tall, one unit to the pixel: the root says
+// width="100%" and its px height, no viewBox; the Svg element carries `height` alone.
+function expectPx(n: Node | undefined, h: number): void {
   expect(n?.type).toBe('Svg')
   expect(n?.props?.width).toBeUndefined()
-  expect(n?.props?.height).toBeUndefined()
+  expect(n?.props?.height).toBe(h)
   const root = rootTag(n)
-  expect(root).toContain(`viewBox="0 0 ${w} ${h}"`)
-  expect(root).toContain('preserveAspectRatio="xMinYMin meet"')
-  expect(root).not.toMatch(/\swidth=/)
-  expect(root).not.toMatch(/\sheight=/)
+  expect(root.startsWith(`<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="${h}"`)).toBe(true)
+  expect(root).not.toContain('viewBox')
+  expect(root).not.toContain('preserveAspectRatio')
+}
+// The main row designed at `w`: its track spans the shares mainRowGeometry(w) lays out.
+function expectMainDesign(n: Node | undefined, w: number): void {
+  const g = mainRowGeometry(w)
+  expect(String(n?.props?.source)).toContain(
+    `<rect class="pbm-k" x="${pct(g.barX / g.W)}" y="4" width="${pct(g.barW / g.W)}" height="22" rx="11"/>`,
+  )
+}
+const unxml = (s: string): string => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&')
+// An agent row designed at `w`: its right text 4px in from the real right
+// edge, its bar ending GAP (10) left of the right slot (at least as wide as
+// `ctx 100% · 999k tok · 00:00`), as a share of `w`.
+function expectRowDesign(n: Node | undefined, w: number): void {
+  const r = String(n?.props?.source)
+  expect(r).not.toContain('pba-sep')
+  expect(r).toMatch(/class="pba-s" x="100%" y="13" transform="translate\(-4,0\)" text-anchor="end"/)
+  const right = unxml(r.match(/class="pba-s"[^>]*>([^<]*)<\/text>/)?.[1] ?? '')
+  const rightW = Math.ceil(Math.max(textWidth('ctx 100% · 999k tok · 00:00', 11), textWidth(right, 11)))
+  const b = r.match(/class="pba-k" x="([\d.]+)%" y="[^"]*" width="([\d.]+)%"/)
+  expect(b).not.toBeNull()
+  const end = Number(b?.[1]) + Number(b?.[2])
+  expect(Math.abs(end - ((w - 4 - rightW - 10) / w) * 100)).toBeLessThanOrEqual(0.011)
 }
 // What a row part is: by key where the drawing keeps one, else by what it draws.
 const roleOf = (n: Node | undefined): string => {
@@ -125,14 +145,14 @@ const roleOf = (n: Node | undefined): string => {
   if (text.includes('"RAM')) return 'ram'
   return keyOf(n)
 }
-// The right zone at `cols` body columns and `height`: one Svg, ~20% of the row,
-// a visible divider down its left edge, the RAM card centered right of it.
+// The right zone at `cols` body columns and `height`: one Svg, designed at
+// ~20% of the row, a visible divider down its left edge, the RAM card
+// centered right of it.
 function expectZone(n: Node | undefined, cols: number, height: number): void {
   const w = rightWOf(cols)
-  expect(Math.abs(widthOf(n) - rowWOf(cols) * 0.2)).toBeLessThanOrEqual(GAP_PX + 1)
-  expect(widthOf(n)).toBe(w)
-  // Designed at the left column's height, drawn at the zone's real width.
-  expectFluid(n, w, height)
+  expect(Math.abs(w - rowWOf(cols) * 0.2)).toBeLessThanOrEqual(GAP_PX + 1)
+  // As tall as the left column, drawn at the zone's real width.
+  expectPx(n, height)
   const src = String(n?.props?.source)
   expect(src).toContain(`<line id="pbz-line" class="pbz-l" x1="0.5" y1="2" x2="0.5" y2="${height - 2}"`)
   expect(src).toContain('#c8c7c2')
@@ -141,12 +161,14 @@ function expectZone(n: Node | undefined, cols: number, height: number): void {
   expect(src).toMatch(/RAM|%</)
   const area = w - 8
   const cardW = Math.min(160, area - 8)
-  // One <svg>: the card is inlined in a translated group, never nested.
-  expect(src.match(/<svg/g)?.length).toBe(1)
-  const x = src.match(/<g id="pbz-card" transform="translate\((\d+),0\)">/)
+  // The card in px around a zero-width <svg> at 50%: its middle at 50% + 4px,
+  // the middle of the area right of the divider at any real width.
+  expect(src.match(/<svg/g)?.length).toBe(2)
+  expect(src).toContain('<svg x="50%" y="0" width="1" height="30" overflow="visible"><g id="pbz-card"')
+  const x = src.match(/<g id="pbz-card" transform="translate\((-?\d+),0\)">/)
   const m = src.match(/<rect id="pbram-card" class="k" x="0" y="0" width="(\d+)" height="30"/)
   expect(Number(m?.[1])).toBe(cardW)
-  expect(Math.abs(Number(x?.[1]) - ((area - cardW) / 2 + 8))).toBeLessThanOrEqual(1)
+  expect(Math.abs(Number(x?.[1]) + cardW / 2 - 4)).toBeLessThanOrEqual(0.5)
   // The alt is short: never a failure's reason.
   const alt = String(n?.props?.alt)
   expect(alt).toMatch(/^RAM( \?| \d+(\.\d)?\/\d+(\.\d)? [KMGT]?B)?$/)
@@ -217,7 +239,7 @@ test('desktop row without agents: [main] [right zone 20%], no 1px divider Svg', 
   expect(kids(tree).length).toBe(2)
   const parts = desktopParts(tree)
   expect(parts.map(roleOf)).toEqual(['main', 'ram'])
-  expect(parts.some(n => widthOf(n) === 1)).toBe(false)
+  expect(parts.some(n => /\swidth="1"/.test(rootTag(n)))).toBe(false)
   expect(JSON.stringify(tree)).not.toContain('pbs-l')
   const rowW = rowWOf(100)
   expect(rowW).toBeGreaterThanOrEqual(500)
@@ -225,13 +247,14 @@ test('desktop row without agents: [main] [right zone 20%], no 1px divider Svg', 
   expect((kids(tree)[0]?.props as { width?: unknown })?.width).toBe('80%')
   expect(desktopCols(tree).rightBox?.props?.width).toBe('20%')
   // No agents: the main bar is designed as the whole left column, and fills its slot.
-  expectFluid(parts[0], leftWOf(100), 30)
+  expectPx(parts[0], 30)
+  expectMainDesign(parts[0], leftWOf(100))
   expectZone(parts[1], 100, 30)
   // left + gap + right: exactly the (conservative) row the pictures are designed at.
-  expect(leftWOf(100) + GAP_PX + widthOf(parts[1])).toBe(rowW)
+  expect(leftWOf(100) + GAP_PX + rightWOf(100)).toBe(rowW)
 })
 
-test('desktop band: every Svg is fluid in percentage slots that never wrap', IT, async ($, on) => {
+test('desktop band: every Svg as wide as its column slot and px tall, in percentage slots that never wrap', IT, async ($, on) => {
   world(on, true)
   await start($)
   const ui = await mount($, 'desktop', { bodyColumns: 150 })
@@ -258,17 +281,22 @@ test('desktop band: every Svg is fluid in percentage slots that never wrap', IT,
   expect(leftBox?.props?.flexShrink).toBe(0)
   expect(rightBox?.props?.width).toBe('20%')
   expect(rightBox?.props?.flexShrink).toBe(1)
+  // A column: it stretches the right zone's Svg to its width.
+  expect(rightBox?.props?.flexDirection).toBe('column')
   const top = kids(leftBox)[0]
   expect(top?.props?.width).toBe('100%')
   expect(top?.props?.flexWrap).toBe('nowrap')
-  // The main bar's slot grows into what the agents button leaves.
+  // The main bar's slot grows into what the agents button leaves, a column
+  // that stretches its Svg across; the agent rows sit in the left column.
+  expect(leftBox?.props?.flexDirection).toBe('column')
   const [mainSlot, agents] = kids(top)
   expect(mainSlot?.type).toBe('Box')
   expect(mainSlot?.props?.flexGrow).toBe(1)
   expect(mainSlot?.props?.flexShrink).toBe(1)
+  expect(mainSlot?.props?.flexDirection).toBe('column')
   expect(roleOf(agents)).toBe('agents')
 
-  // Every picture: a viewBox, no width/height on its root, no width/height props.
+  // Every picture: width="100%" and its px height on its root, no viewBox; the height prop alone.
   const svgs: Node[] = []
   const walk = (n: unknown): void => {
     if (!n || typeof n !== 'object') return
@@ -279,9 +307,12 @@ test('desktop band: every Svg is fluid in percentage slots that never wrap', IT,
   expect(svgs.length).toBe(4)
   const leftW = leftWOf(150)
   const label = String(agents?.props?.label)
-  expectFluid(svgs[0], leftW - agentsPxOf(label) - GAP_PX, 30)
-  expectFluid(svgs[1], leftW, 18)
-  expectFluid(svgs[2], leftW, 18)
+  expectPx(svgs[0], 30)
+  expectMainDesign(svgs[0], leftW - agentsPxOf(label) - GAP_PX)
+  expectPx(svgs[1], 18)
+  expectRowDesign(svgs[1], leftW)
+  expectPx(svgs[2], 18)
+  expectRowDesign(svgs[2], leftW)
   expectZone(svgs[3], 150, 30 + 18 * 2)
 })
 
@@ -299,8 +330,9 @@ for (const cols of [100, 150, 200]) {
     expect(rowW).toBeGreaterThanOrEqual(500)
     expectZone(parts[2], cols, 30)
     // main + gap + agents = left column; + gap + right zone = row.
-    expect(widthOf(parts[0]) + GAP_PX + agentsPxOf('●▾1 · 0')).toBe(leftWOf(cols))
-    expect(leftWOf(cols) + GAP_PX + widthOf(parts[2])).toBe(rowW)
+    expectPx(parts[0], 30)
+    expectMainDesign(parts[0], leftWOf(cols) - GAP_PX - agentsPxOf('●▾1 · 0'))
+    expect(leftWOf(cols) + GAP_PX + rightWOf(cols)).toBe(rowW)
   })
 }
 
@@ -321,7 +353,7 @@ test('desktop row under 500px: the narrow card shows the percent only, still pre
   const src = String(parts[2]?.props?.source)
   expect(src).toContain('>50%</text>')
   expect(src).not.toContain('pbram-track')
-  expect(widthOf(parts[0]) + GAP_PX + agentsPxOf('●▾1 · 0')).toBe(leftWOf(cols))
+  expectMainDesign(parts[0], leftWOf(cols) - GAP_PX - agentsPxOf('●▾1 · 0'))
 })
 
 test('the RAM poll writes the ram atom (Windows probe mocked)', IT, async ($, on) => {
@@ -568,17 +600,11 @@ for (const count of [1, 3]) {
     // Agent rows designed at the left column's width, filling it; no divider of their own; right text ends 4px short.
     const leftW = leftWOf(150)
     for (const n of rows) {
-      expect(widthOf(n)).toBe(leftW)
-      expectFluid(n, leftW, 18)
-      const r = String(n.props?.source)
-      expect(r).not.toContain('pba-sep')
-      const m = r.match(/class="pba-s" x="(\d+(?:\.\d+)?)"[^>]*text-anchor="end"/)
-      expect(Number(m?.[1])).toBe(leftW - 4)
-      for (const b of r.matchAll(/class="pba-k" x="(\d+(?:\.\d+)?)" y="[^"]*" width="(\d+(?:\.\d+)?)"/g))
-        expect(Number(b[1]) + Number(b[2])).toBeLessThan(leftW - 4)
+      expectPx(n, 18)
+      expectRowDesign(n, leftW)
     }
     // The main bar: designed at the left column less the agents estimate and its gap.
-    expect(widthOf(unwrap(kids(left[0])[0]))).toBe(leftW - agentsPxOf(String(kids(left[0])[1]?.props?.label)) - GAP_PX)
+    expectMainDesign(unwrap(kids(left[0])[0]), leftW - agentsPxOf(String(kids(left[0])[1]?.props?.label)) - GAP_PX)
   })
 }
 

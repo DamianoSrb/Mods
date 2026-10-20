@@ -11,7 +11,8 @@ import {
   FONT,
   colorOf,
   fitText,
-  fluidSvgOpen,
+  pct,
+  pxSvgOpen,
   savvyClasses,
   textWidth,
   wholePercent,
@@ -97,9 +98,12 @@ const branchSvg = (branch: Branch, status: AgentRowModel['status']): string => {
 }
 
 /**
- * One agent row, designed at `width` × AGENT_ROW_H (a viewBox only: the
- * surface scales it to the column's real width); the right text ends 4px
- * short of the row's right edge. On the desktop the rows sit in the column
+ * One agent row, AGENT_ROW_H px tall and as wide as its slot (pxSvgOpen), its
+ * geometry designed at `width` (the estimated column width). The tree, the
+ * status mark and the title keep their px at the left; the right text ends
+ * 4px short of the real right edge (`x="100%"`); the bar (track and fill, no
+ * text) spans in percentages of the real width, as designed at `width`, so a
+ * wider column draws a longer bar. On the desktop the rows sit in the column
  * left of the divider. A pure function of the row model: a running row's time
  * comes in whole minutes there (buildAgentRows' timeStyle), so a redraw keeps
  * the same source.
@@ -121,16 +125,18 @@ export function agentRowSvg(r: AgentRowModel, width: number, branch: Branch = 'l
   const title = titleSlot > 12 ? fitText(r.title, 12, titleSlot) : ''
   // Without reported steps a running bar falls back to the context, drawn grey.
   const fillPaint = isGreyBar(r) ? 'class="pba-m"' : `fill="${color}"`
-  const fill = fillW > 0 ? `<rect ${fillPaint} x="${barX}" y="${barY}" width="${fillW}" height="${BAR_H}" rx="2"/>` : ''
+  // A design x or width as a share of the real width.
+  const share = (x: number): string => pct(x / W)
+  const fill = fillW > 0 ? `<rect ${fillPaint} x="${share(barX)}" y="${barY}" width="${share(fillW)}" height="${BAR_H}" rx="2"/>` : ''
   const body =
     branchSvg(branch, r.status) +
     statusMark(r.status, color) +
     (title
       ? `<text class="pba-t" x="${TITLE_X}" y="${TEXT_Y}" font-family="${FONT}" font-size="12">${xml(title)}</text>`
       : '') +
-    (barW > 0 ? `<rect class="pba-k" x="${barX}" y="${barY}" width="${barW}" height="${BAR_H}" rx="2"/>${fill}` : '') +
-    `<text class="pba-s" x="${rightX}" y="${TEXT_Y}" text-anchor="end" font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums" style="font-variant-numeric:tabular-nums">${xml(right)}</text>`
-  return `${fluidSvgOpen(W, AGENT_ROW_H)}${rowCss(r.status === 'running')}${body}</svg>`
+    (barW > 0 ? `<rect class="pba-k" x="${share(barX)}" y="${barY}" width="${share(barW)}" height="${BAR_H}" rx="2"/>${fill}` : '') +
+    `<text class="pba-s" x="100%" y="${TEXT_Y}" transform="translate(${rightX - W},0)" text-anchor="end" font-family="${FONT}" font-size="11" font-variant-numeric="tabular-nums" style="font-variant-numeric:tabular-nums">${xml(right)}</text>`
+  return `${pxSvgOpen(AGENT_ROW_H)}${rowCss(r.status === 'running')}${body}</svg>`
 }
 
 const GLYPH: Record<AgentRowModel['status'], string> = { running: '●', done: '✓', failed: '✗' }

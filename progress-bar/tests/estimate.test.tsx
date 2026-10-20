@@ -184,7 +184,8 @@ test('every planned task done, nothing running, turn idle: drawn finished (100%,
   const svg = mainRowSvg(m, 640, turnSeed(null, m))
   expect(svg).toContain('<g fill="#5fbf8f">')
   expect(svg).toContain('>Attività 2/2</text>')
-  expect(svg).toMatch(/<rect x="\d+" width="\d+" height="22" rx="11" fill="#5fbf8f"\/>/)
+  // The green pill, in px left of its anchor at the full bar's head.
+  expect(svg).toMatch(/<rect x="-\d+" width="\d+" height="22" rx="11" fill="#5fbf8f"\/>/)
   expect(svg).not.toContain('pbm-grad')
   expect(svg).toContain('<circle cx="5" cy="15" r="3" fill="#5fbf8f"/>')
 })

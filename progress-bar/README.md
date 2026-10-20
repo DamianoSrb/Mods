@@ -11,7 +11,7 @@ Una banda sempre visibile sopra il prompt di Claude Code che mostra a che punto 
 - **Scheda RAM**, sempre visibile all'estremità destra della riga (il 20% della riga; su una riga stretta solo la percentuale): memoria usata e totale (`8/16 GB`), letta subito all'avvio e poi ogni 10 secondi (mai due letture insieme). Su Windows prova PowerShell (`Get-CimInstance`, fino a 15 s), poi `typeperf` (contatore inglese, poi italiano) che legge solo la memoria disponibile e usa il totale dell'ultima lettura PowerShell; su Linux legge `/proc/meminfo`; su macOS `sysctl` e `vm_stat`. Una lettura fallita non si vede finché l'ultima riuscita ha meno di 60 secondi; dopo (o se nessuna è mai riuscita) la scheda mostra `RAM ?`. Il testo alternativo resta breve (`RAM 8/16 GB` o `RAM ?`); il motivo completo compare una volta nella trascrizione (`progress-bar: RAM unavailable: …`).
 - **Vista agenti**: quando partono dei subagenti compare, tra la barra e la scheda RAM, il pulsante agenti compatto (`●▾3 · 45k`: `●` se qualcuno lavora, numero di agenti e token totali). Premendolo si apre una riga per agente con avanzamento, token usati e tempo (`3/5 · 12k tok · 1:20`); premendolo di nuovo si chiude. La barra di un agente in corso ha il colore del suo livello (viola per gli agenti non savvy), quella di un agente concluso è piena e verde, quella di uno fallito rossa.
 
-Sul desktop e in VS Code i disegni della banda si adattano alla larghezza reale del pannello: la colonna sinistra occupa l'80% della riga, la zona RAM il 20%.
+Sul desktop e in VS Code la banda occupa la larghezza reale del pannello (la colonna sinistra l'80% della riga, la zona RAM il 20%): testi, pillola e scheda RAM restano della loro dimensione, si allungano solo le barre.
 
 ## Tool per il modello
 

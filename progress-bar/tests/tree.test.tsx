@@ -115,12 +115,15 @@ test('mainRowSvg draws the trunk only with hasBranch', () => {
 test('agentRowSvg draws no divider; its right text ends 4px short of the row', () => {
   const s = agentRowSvg(row('running'), 600, 'mid')
   expect(s).not.toContain('pba-sep')
-  // Fluid: designed at 600 × 18, no width/height on the root.
+  // As wide as its slot, 18px tall, one unit to the pixel: no viewBox.
   const root = s.match(/^<svg[^>]*>/)?.[0] ?? ''
-  expect(root).toContain('viewBox="0 0 600 18"')
-  expect(root).toContain('preserveAspectRatio="xMinYMin meet"')
-  expect(root).not.toMatch(/\s(width|height)=/)
-  expect(s).toMatch(/class="pba-s" x="596"/)
+  expect(root).toBe('<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="18">')
+  // The right text at the real right edge, 4px in.
+  expect(s).toMatch(/class="pba-s" x="100%" y="13" transform="translate\(-4,0\)" text-anchor="end"/)
+  // The bar in percentages of the width it was designed at (600), ending left of the right text.
+  const b = s.match(/class="pba-k" x="([\d.]+)%" y="[^"]*" width="([\d.]+)%"/)
+  expect(b).not.toBeNull()
+  expect(Number(b?.[1]) + Number(b?.[2])).toBeLessThan(((600 - 4) / 600) * 100)
 })
 
 // The bar's fill: the colored rect drawn over the track (pba-k).

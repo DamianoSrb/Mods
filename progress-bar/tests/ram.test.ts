@@ -155,7 +155,7 @@ test('alt text: short, never a failure reason', () => {
   }
 })
 
-test('right zone: one <svg>, the card inlined in a translated group', () => {
+test('right zone: the card centered at 50% in a zero-width <svg>, drawn in px', () => {
   const r = { usedBytes: 21.6 * GiB, totalBytes: 28 * GiB }
   const cases: [typeof r | null, string | null][] = [
     [r, null],
@@ -165,12 +165,14 @@ test('right zone: one <svg>, the card inlined in a translated group', () => {
   ]
   for (const [reading, err] of cases) {
     const svg = rightZoneSvg(reading, err, 180, 66)
-    expect(svg.match(/<svg/g)?.length).toBe(1)
-    expect(svg.match(/<\/svg>/g)?.length).toBe(1)
-    // Fluid: designed at 180 × 66 (a viewBox), no width/height on the root.
-    expect(svg.startsWith('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 66" preserveAspectRatio="xMinYMin meet"')).toBe(true)
-    expect(svg.match(/^<svg[^>]*>/)?.[0]).not.toMatch(/\s(width|height)=/)
-    expect(svg.endsWith('</g></svg>')).toBe(true)
+    // The root and the card's anchor.
+    expect(svg.match(/<svg/g)?.length).toBe(2)
+    expect(svg.match(/<\/svg>/g)?.length).toBe(2)
+    // As wide as its slot, 66px tall, one unit to the pixel: no viewBox.
+    expect(svg.startsWith('<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="66" role="img"')).toBe(true)
+    expect(svg.match(/^<svg[^>]*>/)?.[0]).not.toContain('viewBox')
+    expect(svg).toContain('<svg x="50%" y="0" width="1" height="30" overflow="visible"><g id="pbz-card"')
+    expect(svg.endsWith('</g></svg></svg>')).toBe(true)
     // Both styles at the root, before any drawing.
     expect(svg.match(/<style>/g)?.length).toBe(2)
     expect(svg.indexOf('.pbz-l{')).toBeLessThan(svg.indexOf('<line'))
@@ -181,9 +183,10 @@ test('right zone: one <svg>, the card inlined in a translated group', () => {
     expect(svg).not.toContain('process.run')
     expect(svg).not.toContain('wmic')
   }
-  // Card: 160 wide (the cap), centered right of the divider: 8 + (172 − 160) / 2.
+  // Card: 160 wide (the cap), centered right of the divider: its middle at
+  // 50% + 4px (the middle of the area right of the 8px divider zone).
   const svg = rightZoneSvg(r, null, 180, 66)
-  expect(svg).toContain('<g id="pbz-card" transform="translate(14,0)">')
+  expect(svg).toContain('<g id="pbz-card" transform="translate(-76,0)">')
   expect(svg).toContain('<rect id="pbram-card" class="k" x="0" y="0" width="160" height="30" rx="6"/>')
   expect(svg).toContain('>21.6/28 GB</text>')
   expect(svg).toContain('aria-label="RAM 21.6/28 GB"')
@@ -191,5 +194,5 @@ test('right zone: one <svg>, the card inlined in a translated group', () => {
   // The card's elements are the standalone card's, unchanged.
   const card = ramCardSvg(r, 160, 30)
   const inner = card.slice(card.indexOf('</style>') + '</style>'.length, -'</svg>'.length)
-  expect(svg).toContain(`<g id="pbz-card" transform="translate(14,0)">${inner}</g>`)
+  expect(svg).toContain(`<g id="pbz-card" transform="translate(-76,0)">${inner}</g>`)
 })

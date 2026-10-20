@@ -134,8 +134,9 @@ for (const surface of SURFACES) {
   })
 }
 
-// The Svg sources: each `"source":"<svg …</svg>"` in the drawn tree.
-const svgSources = (text: string): string[] => text.match(/"source":"<svg.*?<\/svg>/g) ?? []
+// The Svg sources: each `"source":"<svg …</svg>"` in the drawn tree, up to the
+// `</svg>` that ends the string (a picture nests <svg>s of its own).
+const svgSources = (text: string): string[] => text.match(/"source":"<svg.*?<\/svg>(?=")/g) ?? []
 
 for (const surface of SURFACES) {
   test(`a flow at 4/9 shows the full label Attività 4/9 (${surface})`, IT, async ($, on) => {
