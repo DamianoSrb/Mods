@@ -48,19 +48,12 @@ let ramProbeIndex = 0
 let ramKnownTotal: number | null = null
 // When the last reading succeeded ($.clock time), or null before any.
 let ramLastOkAt: number | null = null
-// The full failure reason goes to the transcript once per load, never to the card.
-let isRamErrorLogged = false
-
-function logRamErrorOnce($: EngineInterface, reason: string): void {
-  if (isRamErrorLogged) return
-  isRamErrorLogged = true
-  try {
-    // Declared on every surface in the d.ts; the validator forbids probing `$.ui` as a value.
-    $.ui.log(`progress-bar: RAM unavailable: ${reason}`)
-  } catch {
-    // No transcript here: the card still shows RAM ?.
-  }
-}
+// Back-off after a poll where every probe failed: the next poll waits
+// RAM_POLL_MS × 2^failures, at most RAM_BACKOFF_MAX_MS, so hung probes never pile up.
+// Nothing is logged to the transcript: a missed reading is not the person's problem.
+const RAM_BACKOFF_MAX_MS = 5 * 60_000
+let ramFailures = 0
+let ramNextAt = 0
 
 // The short code a failed poll's reasons come to.
 const ramErrorCode = (reason: string): string =>
@@ -73,19 +66,17 @@ const ramErrorCode = (reason: string): string =>
  * shows `RAM ?`) and the full reason is logged, once per load.
  */
 async function ramPollFailed($: EngineInterface, reason: string): Promise<void> {
-  if (ramLastOkAt !== null) {
-    let at: number | null = null
-    try {
-      at = await $.clock.now()
-    } catch {
-      // No clock: treat the reading as stale.
-    }
-    if (at !== null && at - ramLastOkAt < RAM_GRACE_MS) return
+  let at: number | null = null
+  try {
+    at = await $.clock.now()
+  } catch {
+    // No clock: treat the reading as stale, and no back-off.
   }
-  const text = reason.trim() || 'failed'
-  const code = ramErrorCode(text)
+  ramFailures += 1
+  if (at !== null) ramNextAt = at + Math.min(RAM_BACKOFF_MAX_MS, RAM_POLL_MS * 2 ** ramFailures)
+  if (ramLastOkAt !== null && at !== null && at - ramLastOkAt < RAM_GRACE_MS) return
+  const code = ramErrorCode(reason.trim() || 'failed')
   if ((await read($, ramError)) !== code) await update($, ramError, () => code)
-  logRamErrorOnce($, text)
 }
 
 async function detectPlatform($: EngineInterface): Promise<string | null> {
@@ -144,6 +135,14 @@ async function readProbe($: EngineInterface, probe: RamProbe): Promise<RamInfo |
 async function pollRam($: EngineInterface): Promise<void> {
   // Never two polls at once: a slow probe (up to its timeout) makes the next ticks skip.
   if (isRamPolling) return
+  // Backing off after failed polls.
+  if (ramNextAt > 0) {
+    try {
+      if ((await $.clock.now()) < ramNextAt) return
+    } catch {
+      // No clock: poll.
+    }
+  }
   if (!ramPlatform) {
     await ramPollFailed($, 'platform not detected')
     return
@@ -156,8 +155,9 @@ async function pollRam($: EngineInterface): Promise<void> {
   isRamPolling = true
   try {
     // The probe that worked last time first, then the rest in their order.
+    // In rotation from there, so a probe that just hung comes last.
     const first = Math.min(ramProbeIndex, probes.length - 1)
-    const order = [first, ...probes.map((_, i) => i).filter(i => i !== first)]
+    const order = probes.map((_, k) => (first + k) % probes.length)
     const reasons: string[] = []
     for (const i of order) {
       const probe = probes[i]
@@ -165,9 +165,17 @@ async function pollRam($: EngineInterface): Promise<void> {
       const got = await readProbe($, probe)
       if (typeof got === 'string') {
         reasons.push(got)
+        // A probe that hung means the machine is busy: the others would hang too
+        // now, so stop here and start the next poll from the following probe.
+        if (ramErrorCode(got) === 'timeout') {
+          ramProbeIndex = (i + 1) % probes.length
+          break
+        }
         continue
       }
       ramProbeIndex = i
+      ramFailures = 0
+      ramNextAt = 0
       if (probe.format !== 'typeperf') ramKnownTotal = got.totalBytes
       try {
         ramLastOkAt = await $.clock.now()
@@ -484,6 +492,8 @@ export const register: Register = (on, options) => {
     ramProbeIndex = 0
     ramKnownTotal = null
     ramLastOkAt = null
+    ramFailures = 0
+    ramNextAt = 0
     void (async () => {
       ramPlatform = await detectPlatform($)
       await pollRam($)

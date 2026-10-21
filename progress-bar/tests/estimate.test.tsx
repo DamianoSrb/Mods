@@ -142,7 +142,9 @@ test('flow estimate stays in [done/total, 0.99] and is 1 when finished', () => {
   expect(flowEstimate(flow, agents, 6_000)).toEqual({ ratio: 0.99, acceptedRatio: 0.95 })
   expect(flowEstimate({ ...flow, done: 20 }, agents, 6_000)).toEqual({ ratio: 1, acceptedRatio: 1 })
   expect(flowEstimate({ ...flow, isFinished: true }, [], 0)).toEqual({ ratio: 1, acceptedRatio: 1 })
-  expect(flowEstimate({ ...flow, total: 0, done: 0 }, agents, 0)).toEqual({ ratio: 0, acceptedRatio: 0 })
+  // No plan reported: no runs → 0; else the runs' mean share (9/9 steps → 0.9).
+  expect(flowEstimate({ ...flow, total: 0, done: 0 }, [], 0)).toEqual({ ratio: 0, acceptedRatio: 0 })
+  expect(flowEstimate({ ...flow, total: 0, done: 0 }, agents, 0)).toEqual({ ratio: 0.9, acceptedRatio: 0 })
 })
 
 // ---------------------------------------------------------------------------

@@ -183,7 +183,13 @@ function unacceptedShares(f: Flow, agents: readonly AgentRun[], now: number): nu
  */
 export function flowEstimate(f: Flow, agents: readonly AgentRun[], now: number): { ratio: number; acceptedRatio: number } {
   if (f.isFinished) return { ratio: 1, acceptedRatio: 1 }
-  if (!(f.total > 0)) return { ratio: 0, acceptedRatio: 0 }
+  if (!(f.total > 0)) {
+    // No plan reported: the mean share of the runs started so far, so the bar still moves.
+    const runs = [...latestRuns(workerPool(agents)).values()]
+    if (!runs.length) return { ratio: 0, acceptedRatio: 0 }
+    const mean = runs.reduce((n, a) => n + runShare(a, now), 0) / runs.length
+    return { ratio: Math.min(ESTIMATE_CAP, clamp01(mean)), acceptedRatio: 0 }
+  }
   const acceptedRatio = clamp01(f.done / f.total)
   const sum = unacceptedShares(f, agents, now).reduce((n, x) => n + x, 0)
   const estimate = clamp01((Math.min(f.done, f.total) + sum) / f.total)

@@ -415,18 +415,22 @@ test('PowerShell timing out: typeperf (English, then Italian) reads RAM with the
 
   isPsOk = false
   await c.advance(10_000)
+  // PowerShell hangs: that poll stops there (no other probe), the last reading stays.
+  expect(asked.slice(1)).toEqual(['powershell.exe -NoProfile'])
+  expect(String((await ramOf(ui))?.props?.source)).toContain('8/16 GB')
+  // Backed off 20 s; the next poll starts from the following probe.
+  await c.advance(10_000)
+  expect(asked).toHaveLength(2)
+  await c.advance(20_000)
   const ram = await ramOf(ui)
   // 16 GB known from PowerShell, 4 GB available: 12 GB in use.
   expect(String(ram?.props?.source)).toContain('12/16 GB')
   expect(String(ram?.props?.alt)).toBe('RAM 12/16 GB')
-  expect(asked.slice(1)).toEqual([
-    'powershell.exe -NoProfile',
-    'typeperf.exe \\Memory\\Available MBytes',
-    'typeperf.exe \\Memoria\\MByte disponibili',
-  ])
+  expect(asked.slice(2, 4)).toEqual(['typeperf.exe \\Memory\\Available MBytes', 'typeperf.exe \\Memoria\\MByte disponibili'])
   // The probe that worked is tried first from then on.
+  const before = asked.length
   await c.advance(10_000)
-  expect(asked.slice(4)).toEqual(['typeperf.exe \\Memoria\\MByte disponibili'])
+  expect(asked.slice(before)).toEqual(['typeperf.exe \\Memoria\\MByte disponibili'])
 })
 
 test('no total known yet: typeperf is not run and the card shows RAM ?', IT, async ($, on) => {
@@ -495,14 +499,12 @@ test('a failed poll within 60 s keeps the last reading; past 60 s RAM ?, logged 
 
   await c.advance(30_000)
   const ramLogs = logs.filter(l => l.includes('RAM unavailable'))
-  expect(ramLogs).toHaveLength(1)
-  // The full reason chain goes to the log only.
-  expect(ramLogs[0]).toContain('still running after 15000ms')
-  expect(ramLogs[0]).toContain('typeperf.exe exit 1')
+  // Nothing goes to the transcript: a missed reading is not the person's problem.
+  expect(ramLogs).toHaveLength(0)
 
-  // A success clears it.
+  // A success clears it, at the first poll after the back-off (at most 5 min).
   isOk = true
-  await c.advance(10_000)
+  await c.advance(300_000)
   expect(String((await ramOf(ui))?.props?.source)).toContain('8/16 GB')
 })
 
@@ -550,8 +552,7 @@ test('every probe failing from the start: RAM ? with a short alt, the reason log
 
   await c.advance(30_000)
   const ramLogs = logs.filter(l => l.includes('RAM unavailable'))
-  expect(ramLogs).toHaveLength(1)
-  expect(ramLogs[0]).toContain('process.run refused')
+  expect(ramLogs).toHaveLength(0)
 })
 
 test('linux: /proc/meminfo through fs.read; a later parse failure keeps the value', IT, async ($, on) => {
